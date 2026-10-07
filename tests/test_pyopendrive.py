@@ -704,20 +704,81 @@ def test_web_javascript_pins_editor_maplibre_dependency() -> None:
         assert f'from "{import_url}"' in index_javascript
 
 
-def test_web_spotlight_panel_defaults_to_right_side() -> None:
-    """Saved drag coordinates must not override the right-side CSS layout."""
+def test_web_spotlight_panel_can_dock_on_either_side() -> None:
+    """The full-height viewer sidebar must sit outside the main map view."""
     repo_root = Path(__file__).resolve().parents[1]
+    index_html = (repo_root / "pyxodr3d" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
     index_css = (repo_root / "pyxodr3d" / "web" / "index.css").read_text(
         encoding="utf-8"
     )
     index_javascript = (repo_root / "pyxodr3d" / "web" / "index.js").read_text(
         encoding="utf-8"
     )
+    main_view_rule = index_css.partition("#main_view {")[2].partition("}")[0]
     spotlight_rule = index_css.partition("#spotlight {")[2].partition("}")[0]
 
-    assert "right: 12px;" in spotlight_rule
+    assert '<main id="main_view">' in index_html
+    assert '<aside id="spotlight" data-side="right"' in index_html
+    assert 'id="spotlight_dock_left"' in index_html
+    assert 'id="spotlight_dock_right"' in index_html
+    assert "flex: 1 1 auto;" in main_view_rule
+    assert "min-width: 0;" in main_view_rule
+    assert "position: relative;" in spotlight_rule
+    assert "flex: 0 0 auto;" in spotlight_rule
+    assert "height: 100%;" in spotlight_rule
+    assert '#spotlight[data-side="left"]' in index_css
+    assert '#spotlight[data-side="right"]' in index_css
+    assert (
+        'const SPOTLIGHT_SIDE_STORAGE_KEY = "opendriveviewer_side"'
+        in index_javascript
+    )
+    assert 'setSpotlightSide(storedSide === "left" ? "left" : "right", false)' in (
+        index_javascript
+    )
+    assert 'spotlightDockLeft.addEventListener("click"' in index_javascript
+    assert 'spotlightDockRight.addEventListener("click"' in index_javascript
+    assert "map.resize();" in index_javascript
+    assert "mainView.getBoundingClientRect()" in index_javascript
+    assert "setSpotlightPosition" not in index_javascript
     assert 'localStorage.removeItem("opendriveviewer_left")' in index_javascript
     assert 'localStorage.removeItem("opendriveviewer_top")' in index_javascript
+
+
+def test_web_basemap_fallback_requires_invalid_projection() -> None:
+    """Invalid map coordinates use Grid Mesh without reacting to tile errors."""
+    repo_root = Path(__file__).resolve().parents[1]
+    index_html = (repo_root / "pyxodr3d" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    index_css = (repo_root / "pyxodr3d" / "web" / "index.css").read_text(
+        encoding="utf-8"
+    )
+    index_javascript = (repo_root / "pyxodr3d" / "web" / "index.js").read_text(
+        encoding="utf-8"
+    )
+    normalized_html = " ".join(index_html.split())
+
+    assert 'id="basemap_fallback_notice" role="alert"' in index_html
+    assert (
+        "source file does not include usable projection information"
+        in normalized_html
+    )
+    assert "could not be rendered on a real-world map" in normalized_html
+    assert "#basemap_fallback_notice[hidden]" in index_css
+    assert "payloadSupportsRealWorldBasemap === false" in index_javascript
+    assert 'const nextBasemapId = unsupportedRealWorldBasemap ? "gridmesh"' in (
+        index_javascript
+    )
+    assert (
+        'const basemapId = payloadSupportsRealWorldBasemap ? "google_satellite"'
+        in index_javascript
+    )
+    assert "return changeBasemap(basemapId, { persist: false });" in index_javascript
+    assert 'map.on("error", handleBasemapRenderError)' not in index_javascript
+    assert "isActiveBasemapRenderError" not in index_javascript
+    assert "basemapFallbackNoticeClose.addEventListener" in index_javascript
 
 
 @pytest.mark.skip(reason="Skipping test for now")

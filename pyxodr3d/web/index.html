@@ -16,41 +16,75 @@
     <link rel="stylesheet" href="./index.css" />
   </head>
   <body>
-    <div id="map"></div>
-    <div id="loading_screen" class="fullscreen" aria-live="polite" aria-busy="true">
-      <p id="loading_screen_msg" class="centered">
-        <i class="fa fa-hourglass"></i>
-        <span id="loading_screen_msg_txt">Loading...</span>
-      </p>
-    </div>
-    <div id="toolbar">
-      <input id="xodr_file_input" type="file" accept=".xodr,.xml" />
-      <label for="xodr_file_input" class="btn btn-primary btn-sm">
-        <i class="fa fa-upload"></i>
-        Open .xodr
-      </label>
-      <button id="save_xodr_btn" type="button" class="btn btn-success btn-sm">
-        <i class="fa fa-save"></i>
-        Save .xodr
-      </button>
-      <button id="fit_btn" type="button" class="btn btn-default btn-sm">
-        <i class="fa fa-crosshairs"></i>
-        Fit
-      </button>
-      <button id="reload_btn" type="button" class="btn btn-default btn-sm">
-        <i class="fa fa-refresh"></i>
-        Reload
-      </button>
-    </div>
-    <div id="basemap_control">
-      <label for="basemap_select">Basemap</label>
-      <select id="basemap_select"></select>
-    </div>
-    <div id="spotlight">
+    <main id="main_view">
+      <div id="map"></div>
+      <div id="loading_screen" class="fullscreen" aria-live="polite" aria-busy="true">
+        <p id="loading_screen_msg" class="centered">
+          <i class="fa fa-hourglass"></i>
+          <span id="loading_screen_msg_txt">Loading...</span>
+        </p>
+      </div>
+      <div id="basemap_fallback_notice" role="alert" aria-live="assertive" hidden>
+        <span>
+          Grid Mesh is being used because the source file does not include usable projection information
+          or could not be rendered on a real-world map.
+        </span>
+        <button id="basemap_fallback_notice_close" type="button" aria-label="Dismiss basemap message">
+          &times;
+        </button>
+      </div>
+      <div id="toolbar">
+        <input id="xodr_file_input" type="file" accept=".xodr,.xml" />
+        <label for="xodr_file_input" class="btn btn-primary btn-sm">
+          <i class="fa fa-upload"></i>
+          Open .xodr
+        </label>
+        <button id="save_xodr_btn" type="button" class="btn btn-success btn-sm">
+          <i class="fa fa-save"></i>
+          Save .xodr
+        </button>
+        <button id="fit_btn" type="button" class="btn btn-default btn-sm">
+          <i class="fa fa-crosshairs"></i>
+          Fit
+        </button>
+        <button id="reload_btn" type="button" class="btn btn-default btn-sm">
+          <i class="fa fa-refresh"></i>
+          Reload
+        </button>
+      </div>
+      <div id="basemap_control">
+        <label for="basemap_select">Basemap</label>
+        <select id="basemap_select"></select>
+      </div>
+      <div id="status">Loading OpenDRIVE network...</div>
+      <div id="object_palette">
+        <strong>3D Objects</strong>
+        <div id="object_palette_grid"></div>
+      </div>
+    </main>
+    <aside id="spotlight" data-side="right" aria-label="OpenDrive 3D Viewer panel">
       <div id="spotlight_header">
         <strong id="spotlight_title">OpenDrive 3D Viewer</strong>
         <div id="spotlight_header_controls">
-          <button id="spotlight_toggle" type="button" title="Fold panel">-</button>
+          <button
+            id="spotlight_dock_left"
+            type="button"
+            title="Show panel on left"
+            aria-label="Show panel on left"
+            aria-pressed="false"
+          >
+            <i class="fa fa-align-left" aria-hidden="true"></i>
+          </button>
+          <button
+            id="spotlight_dock_right"
+            type="button"
+            title="Show panel on right"
+            aria-label="Show panel on right"
+            aria-pressed="true"
+          >
+            <i class="fa fa-align-right" aria-hidden="true"></i>
+          </button>
+          <button id="spotlight_toggle" type="button" title="Fold panel" aria-label="Fold panel">-</button>
         </div>
       </div>
       <div id="spotlight_content">
@@ -67,7 +101,7 @@
           </div>
           <div id="global_lane_width_control">
             <label for="global_lane_width">LANE WIDTH</label>
-            <input id="global_lane_width" type="number" min="0.2" step="0.1" value="3.5" />
+            <input id="global_lane_width" type="number" min="0.2" step="0.1" max="10" value="3.5" />
           </div>
           <div id="lane_arrow_size_control">
             <label for="lane_arrow_size">ARROW SIZE</label>
@@ -79,12 +113,7 @@
       </div>
       <div id="spotlight_resize_handle_left" class="spotlight-resize-handle" title="Resize panel"></div>
       <div id="spotlight_resize_handle_right" class="spotlight-resize-handle" title="Resize panel"></div>
-    </div>
-    <div id="status">Loading OpenDRIVE network...</div>
-    <div id="object_palette">
-      <strong>3D Objects</strong>
-      <div id="object_palette_grid"></div>
-    </div>
+    </aside>
     <script type="module" src="./index.js?v=20260602_mime"></script>
   </body>
 </html>

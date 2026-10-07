@@ -141,8 +141,14 @@ Return value:
 - Supports basemaps including OpenStreetMap, Google road/satellite, Carto,
   Esri, OpenTopoMap, OSM HOT, and a local `Grid Mesh` basemap similar to the
   original grid-style OpenDRIVE view.
+- Automatically uses `Grid Mesh` and displays a dismissible notice when the
+  source lacks usable projection information or its converted coordinates
+  cannot be placed on a real-world map. Transient raster tile failures do not
+  replace an otherwise valid real-world basemap.
 - Preserves loaded OpenDRIVE overlays when switching basemaps.
 - Shows the OpenDriveViewer panel with editable selected-feature attributes.
+- Docks the OpenDriveViewer panel as a full-height left or right sidebar outside
+  the map view, resizes the map to the remaining space, and remembers the side.
 - Selects map objects with a single click.
 - Drags lanes, signal heads, posts, and mast arms directly on the map.
 - Supports `Undo Move` and `Ctrl+Z` / `Cmd+Z` for the last drag movement.

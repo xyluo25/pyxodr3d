@@ -4,6 +4,7 @@ import { GeoEditor } from "https://esm.sh/maplibre-gl-geo-editor@0.7.3?deps=mapl
 import { odrObjectDefinitions } from "./static/odr-3d-objects.js?v=20260515_objects_color";
 
 const status = document.getElementById("status");
+const mainView = document.getElementById("main_view");
 const loadingScreen = document.getElementById("loading_screen");
 const loadingScreenText = document.getElementById("loading_screen_msg_txt");
 const fileInput = document.getElementById("xodr_file_input");
@@ -13,9 +14,12 @@ const saveButton = document.getElementById("save_xodr_btn");
 const fitButton = document.getElementById("fit_btn");
 const reloadButton = document.getElementById("reload_btn");
 const basemapSelect = document.getElementById("basemap_select");
+const basemapFallbackNotice = document.getElementById("basemap_fallback_notice");
+const basemapFallbackNoticeClose = document.getElementById("basemap_fallback_notice_close");
 const spotlight = document.getElementById("spotlight");
 const spotlightToggle = document.getElementById("spotlight_toggle");
-const spotlightHeader = document.getElementById("spotlight_header");
+const spotlightDockLeft = document.getElementById("spotlight_dock_left");
+const spotlightDockRight = document.getElementById("spotlight_dock_right");
 const spotlightResizeHandleLeft = document.getElementById("spotlight_resize_handle_left");
 const spotlightResizeHandleRight = document.getElementById("spotlight_resize_handle_right");
 const attributeFields = document.getElementById("attribute_fields");
@@ -29,6 +33,7 @@ const undoMoveButton = document.getElementById("undo_move_btn");
 const globalLaneWidthInput = document.getElementById("global_lane_width");
 const laneArrowSizeInput = document.getElementById("lane_arrow_size");
 const toggleLaneArrowsButton = document.getElementById("toggle_lane_arrows_btn");
+const SPOTLIGHT_SIDE_STORAGE_KEY = "opendriveviewer_side";
 
 // The browser keeps three editable data sets:
 // roads for OpenDRIVE planView centerlines, lanes for lane-level polygons,
@@ -126,11 +131,11 @@ const basemaps = {
     tiles: ["https://a.tile.opentopomap.org/{z}/{x}/{y}.png"],
     attribution: "Map data &copy; OpenStreetMap contributors, SRTM | Style &copy; OpenTopoMap",
   },
-  osm_hot: {
-    label: "OSM Humanitarian",
-    tiles: ["https://a.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"],
-    attribution: "&copy; OpenStreetMap contributors, HOT",
-  },
+  // osm_hot: {
+  //   label: "OSM Humanitarian",
+  //   tiles: ["https://a.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"],
+  //   attribution: "&copy; OpenStreetMap contributors, HOT",
+  // },
   gridmesh: {
     label: "Grid Mesh",
     kind: "gridmesh",
@@ -186,6 +191,7 @@ for (const [id, basemap] of Object.entries(basemaps)) {
 }
 basemapSelect.value = "gridmesh";
 let activeBasemapId = basemapSelect.value;
+let payloadSupportsRealWorldBasemap = null;
 
 const map = new maplibregl.Map({
   container: "map",
@@ -215,11 +221,31 @@ map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-
 map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
 map.once("style.load", () => scheduleGridMeshRefresh());
 
+function showBasemapFallbackNotice() {
+  basemapFallbackNotice.hidden = false;
+}
+
+function hideBasemapFallbackNotice() {
+  basemapFallbackNotice.hidden = true;
+}
+
+function requiresRealWorldProjection(basemapId) {
+  return basemaps[basemapId]?.kind !== "gridmesh";
+}
+
 // Changing a MapLibre style removes custom sources and layers.  Keep the
 // current selection, swap the basemap, then rebuild the OpenDRIVE overlays.
 function changeBasemap(basemapId, options = {}) {
-  const nextBasemapId = basemaps[basemapId] ? basemapId : "openstreetmap";
+  const requestedBasemapId = basemaps[basemapId] ? basemapId : "openstreetmap";
+  const unsupportedRealWorldBasemap = (
+    payloadSupportsRealWorldBasemap === false &&
+    requiresRealWorldProjection(requestedBasemapId)
+  );
+  const nextBasemapId = unsupportedRealWorldBasemap ? "gridmesh" : requestedBasemapId;
   const persist = options.persist !== false;
+  if (unsupportedRealWorldBasemap) {
+    showBasemapFallbackNotice();
+  }
   basemapSelect.value = nextBasemapId;
   if (persist) {
     localStorage.setItem("opendriveviewer_basemap", nextBasemapId);
@@ -335,7 +361,13 @@ function payloadHasRealWorldLonLat(payload) {
 }
 
 function applyDefaultBasemapForPayload(payload) {
-  const basemapId = payloadHasRealWorldLonLat(payload) ? "google_satellite" : "gridmesh";
+  payloadSupportsRealWorldBasemap = payloadHasRealWorldLonLat(payload);
+  const basemapId = payloadSupportsRealWorldBasemap ? "google_satellite" : "gridmesh";
+  if (payloadSupportsRealWorldBasemap) {
+    hideBasemapFallbackNotice();
+  } else {
+    showBasemapFallbackNotice();
+  }
   return changeBasemap(basemapId, { persist: false });
 }
 
@@ -655,32 +687,41 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+let spotlightMapResizeFrame = null;
+
+function scheduleSpotlightMapResize() {
+  if (spotlightMapResizeFrame !== null) return;
+  spotlightMapResizeFrame = window.requestAnimationFrame(() => {
+    spotlightMapResizeFrame = null;
+    map.resize();
+  });
+}
+
 function setSpotlightWidth(width) {
-  const maxWidth = Math.max(240, window.innerWidth - 24);
+  const maxWidth = Math.max(240, window.innerWidth - 80);
   const nextWidth = clamp(Number(width) || 300, 240, Math.min(720, maxWidth));
   spotlight.style.width = `${nextWidth}px`;
   localStorage.setItem("opendriveviewer_width", String(Math.round(nextWidth)));
+  scheduleSpotlightMapResize();
 }
 
-function setSpotlightPosition(left, top) {
-  const rect = spotlight.getBoundingClientRect();
-  const nextLeft = clamp(left, 8, Math.max(8, window.innerWidth - rect.width - 8));
-  const nextTop = clamp(top, 8, Math.max(8, window.innerHeight - rect.height - 8));
-  spotlight.style.left = `${nextLeft}px`;
-  spotlight.style.top = `${nextTop}px`;
-  spotlight.style.right = "auto";
+function getSpotlightSide() {
+  return ["left", "right"].includes(spotlight.dataset.side) ? spotlight.dataset.side : null;
 }
 
-function setSpotlightLeftResize(left, width, top) {
-  const maxRight = window.innerWidth - 8;
-  const nextLeft = clamp(left, 8, maxRight - 240);
-  const nextWidth = clamp(width, 240, Math.min(720, maxRight - nextLeft));
-  const nextTop = clamp(top, 8, Math.max(8, window.innerHeight - spotlight.getBoundingClientRect().height - 8));
-  spotlight.style.left = `${nextLeft}px`;
-  spotlight.style.right = "auto";
-  spotlight.style.top = `${nextTop}px`;
-  spotlight.style.width = `${nextWidth}px`;
-  localStorage.setItem("opendriveviewer_width", String(Math.round(nextWidth)));
+function updateSpotlightSideControls(side) {
+  spotlightDockLeft.setAttribute("aria-pressed", String(side === "left"));
+  spotlightDockRight.setAttribute("aria-pressed", String(side === "right"));
+}
+
+function setSpotlightSide(side, persist = true) {
+  const nextSide = side === "left" ? "left" : "right";
+  spotlight.dataset.side = nextSide;
+  updateSpotlightSideControls(nextSide);
+  if (persist) {
+    localStorage.setItem(SPOTLIGHT_SIDE_STORAGE_KEY, nextSide);
+  }
+  scheduleSpotlightMapResize();
 }
 
 function restoreSpotlightLayout() {
@@ -688,8 +729,10 @@ function restoreSpotlightLayout() {
   if (Number.isFinite(storedWidth) && storedWidth > 0) {
     setSpotlightWidth(storedWidth);
   }
+  const storedSide = localStorage.getItem(SPOTLIGHT_SIDE_STORAGE_KEY);
+  setSpotlightSide(storedSide === "left" ? "left" : "right", false);
   // Older versions restored arbitrary drag coordinates that could reopen the
-  // panel on the left. Let the responsive CSS anchor every new page on the right.
+  // panel away from the selected sidebar. Side placement now uses its own key.
   localStorage.removeItem("opendriveviewer_left");
   localStorage.removeItem("opendriveviewer_top");
 }
@@ -2012,9 +2055,13 @@ function renderObjectPalette() {
 function setObjectPaletteOpen(open, anchorElement = null) {
   objectPalette.classList.toggle("open", open);
   if (open && anchorElement) {
+    const mainViewRect = mainView.getBoundingClientRect();
     const rect = anchorElement.getBoundingClientRect();
-    objectPalette.style.left = `${Math.max(8, Math.min(window.innerWidth - 280, rect.left - 260))}px`;
-    objectPalette.style.top = `${Math.max(8, Math.min(window.innerHeight - 260, rect.top))}px`;
+    const left = rect.left - mainViewRect.left - 260;
+    const top = rect.top - mainViewRect.top;
+    objectPalette.style.left = `${Math.max(8, Math.min(mainViewRect.width - 280, left))}px`;
+    objectPalette.style.top = `${Math.max(8, Math.min(mainViewRect.height - 260, top))}px`;
+    objectPalette.style.right = "auto";
   }
 }
 
@@ -3101,49 +3148,28 @@ laneArrowSizeInput.addEventListener("input", applyLaneArrowSize);
 laneArrowSizeInput.addEventListener("change", applyLaneArrowSize);
 toggleLaneArrowsButton.addEventListener("click", toggleLaneArrows);
 basemapSelect.addEventListener("change", () => changeBasemap(basemapSelect.value));
+basemapFallbackNoticeClose.addEventListener("click", hideBasemapFallbackNotice);
 spotlightToggle.addEventListener("click", () => {
   const collapsed = spotlight.classList.toggle("collapsed");
   spotlightToggle.textContent = collapsed ? "+" : "-";
   spotlightToggle.title = collapsed ? "Unfold panel" : "Fold panel";
+  spotlightToggle.setAttribute("aria-label", spotlightToggle.title);
+  scheduleSpotlightMapResize();
 });
-spotlightHeader.addEventListener("pointerdown", (event) => {
-  if (event.target.closest("button, input, textarea, select, label")) return;
-  const rect = spotlight.getBoundingClientRect();
-  const startX = event.clientX;
-  const startY = event.clientY;
-  const startLeft = rect.left;
-  const startTop = rect.top;
-  spotlightHeader.setPointerCapture(event.pointerId);
-
-  const onPointerMove = (moveEvent) => {
-    setSpotlightPosition(
-      startLeft + moveEvent.clientX - startX,
-      startTop + moveEvent.clientY - startY
-    );
-  };
-  const onPointerUp = () => {
-    spotlightHeader.removeEventListener("pointermove", onPointerMove);
-    spotlightHeader.removeEventListener("pointerup", onPointerUp);
-    spotlightHeader.removeEventListener("pointercancel", onPointerUp);
-  };
-  spotlightHeader.addEventListener("pointermove", onPointerMove);
-  spotlightHeader.addEventListener("pointerup", onPointerUp);
-  spotlightHeader.addEventListener("pointercancel", onPointerUp);
-});
+spotlightDockLeft.addEventListener("click", () => setSpotlightSide("left"));
+spotlightDockRight.addEventListener("click", () => setSpotlightSide("right"));
 function startRightResize(event) {
+  if (getSpotlightSide() !== "left") return;
   event.preventDefault();
   event.stopPropagation();
   const rect = spotlight.getBoundingClientRect();
   const startX = event.clientX;
   const startWidth = rect.width;
-  const anchoredRight = window.innerWidth - rect.right;
   spotlightResizeHandleRight.setPointerCapture(event.pointerId);
 
   const onPointerMove = (moveEvent) => {
     const nextWidth = startWidth + moveEvent.clientX - startX;
     setSpotlightWidth(nextWidth);
-    spotlight.style.right = `${anchoredRight}px`;
-    spotlight.style.left = "auto";
   };
   const onPointerUp = () => {
     spotlightResizeHandleRight.removeEventListener("pointermove", onPointerMove);
@@ -3156,18 +3182,17 @@ function startRightResize(event) {
 }
 
 function startLeftResize(event) {
+  if (getSpotlightSide() !== "right") return;
   event.preventDefault();
   event.stopPropagation();
   const rect = spotlight.getBoundingClientRect();
   const startX = event.clientX;
-  const startLeft = rect.left;
-  const startTop = rect.top;
   const startWidth = rect.width;
   spotlightResizeHandleLeft.setPointerCapture(event.pointerId);
 
   const onPointerMove = (moveEvent) => {
     const dx = moveEvent.clientX - startX;
-    setSpotlightLeftResize(startLeft + dx, startWidth - dx, startTop);
+    setSpotlightWidth(startWidth - dx);
   };
   const onPointerUp = () => {
     spotlightResizeHandleLeft.removeEventListener("pointermove", onPointerMove);
@@ -3182,9 +3207,10 @@ function startLeftResize(event) {
 spotlightResizeHandleRight.addEventListener("pointerdown", startRightResize);
 spotlightResizeHandleLeft.addEventListener("pointerdown", startLeftResize);
 window.addEventListener("resize", () => {
-  setSpotlightWidth(spotlight.getBoundingClientRect().width);
-  const rect = spotlight.getBoundingClientRect();
-  setSpotlightPosition(rect.left, rect.top);
+  if (!spotlight.classList.contains("collapsed")) {
+    setSpotlightWidth(spotlight.getBoundingClientRect().width);
+  }
+  scheduleSpotlightMapResize();
 });
 window.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {

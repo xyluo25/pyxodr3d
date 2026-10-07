@@ -8,6 +8,19 @@ body {
   background: #f3f4f1;
 }
 
+body {
+  display: flex;
+}
+
+#main_view {
+  position: relative;
+  order: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
 #map {
   position: absolute;
   inset: 0;
@@ -34,6 +47,45 @@ body {
   display: none;
 }
 
+#basemap_fallback_notice {
+  position: absolute;
+  top: 72px;
+  left: 50%;
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: min(520px, calc(100% - 24px));
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid #f5b544;
+  border-radius: 6px;
+  color: #573a00;
+  background: #fff7e6;
+  box-shadow: 0 10px 26px rgba(20, 24, 28, 0.18);
+  font-size: 13px;
+  line-height: 1.4;
+  transform: translateX(-50%);
+}
+
+#basemap_fallback_notice[hidden] {
+  display: none;
+}
+
+#basemap_fallback_notice_close {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  margin: -4px -4px 0 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
 #loading_screen_msg {
   margin: 0;
   color: #1f2933;
@@ -55,7 +107,7 @@ body {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
-  max-width: calc(100% - 420px);
+  max-width: calc(100% - 68px);
   padding: 8px;
   border: 1px solid rgba(20, 24, 28, 0.16);
   border-radius: 6px;
@@ -124,20 +176,33 @@ body {
 }
 
 #spotlight {
-  position: absolute;
-  right: 12px;
-  top: 12px;
-  z-index: 2;
+  position: relative;
+  z-index: 5;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
   width: 300px;
+  height: 100%;
   min-width: 240px;
-  max-width: calc(100% - 24px);
+  max-width: min(720px, calc(100vw - 80px));
+  box-sizing: border-box;
   padding: 10px 12px;
   border: 1px solid rgba(20, 24, 28, 0.16);
-  border-radius: 6px;
   color: #1f2933;
-  background: rgba(255, 255, 255, 0.95);
-  box-shadow: 0 8px 22px rgba(20, 24, 28, 0.12);
+  background: #ffffff;
   font-size: 13px;
+}
+
+#spotlight[data-side="left"] {
+  order: 0;
+  border-width: 0 1px 0 0;
+  box-shadow: 6px 0 18px rgba(20, 24, 28, 0.1);
+}
+
+#spotlight[data-side="right"] {
+  order: 2;
+  border-width: 0 0 0 1px;
+  box-shadow: -6px 0 18px rgba(20, 24, 28, 0.1);
 }
 
 #spotlight_title {
@@ -153,18 +218,35 @@ body {
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 8px;
-  cursor: move;
   user-select: none;
 }
 
-#spotlight_toggle {
+#spotlight_content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+#spotlight_header_controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
+  padding: 0;
   border: 1px solid rgba(20, 24, 28, 0.18);
   border-radius: 4px;
   background: #ffffff;
   color: #1f2933;
   line-height: 1;
+  cursor: pointer;
+}
+
+#spotlight_header_controls button:hover,
+#spotlight_header_controls button[aria-pressed="true"] {
+  border-color: rgba(46, 144, 250, 0.65);
+  background: #eff8ff;
 }
 
 #spotlight_header_controls {
@@ -191,6 +273,12 @@ body {
   right: -4px;
 }
 
+#spotlight[data-side="left"] #spotlight_resize_handle_left,
+#spotlight[data-side="right"] #spotlight_resize_handle_right,
+#spotlight.collapsed .spotlight-resize-handle {
+  display: none;
+}
+
 .spotlight-resize-handle::after {
   content: "";
   position: absolute;
@@ -214,7 +302,20 @@ body {
 }
 
 #spotlight.collapsed {
-  width: auto;
+  width: 48px !important;
+  min-width: 48px;
+  padding: 10px;
+}
+
+#spotlight.collapsed #spotlight_header {
+  justify-content: center;
+  margin-bottom: 0;
+}
+
+#spotlight.collapsed #spotlight_title,
+#spotlight.collapsed #spotlight_dock_left,
+#spotlight.collapsed #spotlight_dock_right {
+  display: none;
 }
 
 #attribute_editor {
@@ -282,9 +383,7 @@ body {
 #attribute_fields {
   display: grid;
   gap: 6px;
-  max-height: min(44vh, 420px);
-  overflow: auto;
-  padding-right: 2px;
+  max-height: none;
 }
 
 .attribute-row {
@@ -392,18 +491,14 @@ body {
 }
 
 @media (max-width: 780px) {
+  #basemap_fallback_notice {
+    top: 116px;
+  }
+
   #toolbar {
     left: 8px;
     right: 8px;
     max-width: none;
-  }
-
-  #spotlight {
-    top: auto;
-    bottom: 96px;
-    left: 8px;
-    right: 8px;
-    width: auto;
   }
 
   #basemap_control {

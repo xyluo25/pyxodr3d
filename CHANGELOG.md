@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-07
+
+### Added
+
+- Add controls to dock the OpenDrive 3D Viewer panel as a full-height left or
+  right sidebar outside the map, with persistent side and width settings.
+
+### Fixed
+
+- Fall back to Grid Mesh with a visible explanation when source projection
+  information or converted coordinates are unusable, while preserving a valid
+  real-world basemap when individual raster tile requests fail.
+
 ## 2026-10-01
 
 ### Fixed
