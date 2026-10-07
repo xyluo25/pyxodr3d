@@ -8,14 +8,15 @@
       content="OpenDRIVE editor powered by pyxodr3d, MapLibre GL, and maplibre-gl-geo-editor."
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/jpeg" href="./ornl_logo.jpg" />
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@geoman-io/maplibre-geoman-free@0.7.1/dist/maplibre-geoman.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl-geo-editor@0.7.3/style.css" />
     <link rel="stylesheet" href="./static/font-awesome.min.css" />
     <link rel="stylesheet" href="./static/bootstrap.min.css" />
-    <link rel="stylesheet" href="./index.css" />
+    <link rel="stylesheet" href="./index.css?v=20261007_middle_splitter" />
   </head>
-  <body>
+  <body data-spotlight-side="right">
     <main id="main_view">
       <div id="map"></div>
       <div id="loading_screen" class="fullscreen" aria-live="polite" aria-busy="true">
@@ -62,6 +63,17 @@
         <div id="object_palette_grid"></div>
       </div>
     </main>
+    <div
+      id="spotlight_splitter"
+      role="separator"
+      aria-label="Resize OpenDrive 3D Viewer sidebar"
+      aria-orientation="vertical"
+      aria-valuemin="240"
+      aria-valuemax="720"
+      aria-valuenow="300"
+      tabindex="0"
+      title="Resize panel"
+    ></div>
     <aside id="spotlight" data-side="right" aria-label="OpenDrive 3D Viewer panel">
       <div id="spotlight_header">
         <strong id="spotlight_title">OpenDrive 3D Viewer</strong>
@@ -111,10 +123,7 @@
           <div id="attribute_fields"></div>
         </div>
       </div>
-      <div id="spotlight_resize_handle_left" class="spotlight-resize-handle" title="Resize panel"></div>
-      <div id="spotlight_resize_handle_right" class="spotlight-resize-handle" title="Resize panel"></div>
     </aside>
     <script type="module" src="./index.js?v=20260602_mime"></script>
   </body>
 </html>
-

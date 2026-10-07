@@ -158,7 +158,9 @@ public instance.
 - Preserves loaded OpenDRIVE overlays when switching basemaps.
 - Shows the OpenDriveViewer panel with editable selected-feature attributes.
 - Docks the OpenDriveViewer panel as a full-height left or right sidebar outside
-  the map view, resizes the map to the remaining space, and remembers the side.
+  the rounded map view, provides a dedicated centered splitter with a vertical
+  three-dot resize grip and readable control sections, resizes the map to the
+  remaining space, and remembers the side.
 - Selects map objects with a single click.
 - Drags lanes, signal heads, posts, and mast arms directly on the map.
 - Supports `Undo Move` and `Ctrl+Z` / `Cmd+Z` for the last drag movement.

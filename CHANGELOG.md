@@ -9,6 +9,11 @@
 
 ### Changed
 
+- Use the supplied ORNL JPEG logo as the web viewer favicon.
+
+- Refresh the web viewer layout with aligned rounded map/sidebar surfaces, a
+  three-dot resize affordance, and clearer sidebar control spacing and states.
+
 - Comment out CARTO Light and Dark because they require an external API key,
   and add the keyless OpenFreeMap Positron vector style as a light basemap.
 
@@ -17,6 +22,10 @@
   arrow from predecessor/successor geometry with an RHT/LHT fallback.
 
 ### Fixed
+
+- Replace the sidebar-owned resize handles with one dedicated, keyboard
+  accessible middle splitter whose vertical three-dot grip stays centered
+  between the map and sidebar on either side.
 
 - Prevent the web viewer from remaining on its loading screen because the lane
   arrow optimization duplicated an existing module-level helper name.

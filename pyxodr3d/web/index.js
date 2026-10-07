@@ -20,8 +20,7 @@ const spotlight = document.getElementById("spotlight");
 const spotlightToggle = document.getElementById("spotlight_toggle");
 const spotlightDockLeft = document.getElementById("spotlight_dock_left");
 const spotlightDockRight = document.getElementById("spotlight_dock_right");
-const spotlightResizeHandleLeft = document.getElementById("spotlight_resize_handle_left");
-const spotlightResizeHandleRight = document.getElementById("spotlight_resize_handle_right");
+const spotlightSplitter = document.getElementById("spotlight_splitter");
 const attributeFields = document.getElementById("attribute_fields");
 const addLaneButton = document.getElementById("add_lane_btn");
 const deleteFeatureButton = document.getElementById("delete_feature_btn");
@@ -903,6 +902,8 @@ function setSpotlightWidth(width) {
   const maxWidth = Math.max(240, window.innerWidth - 80);
   const nextWidth = clamp(Number(width) || 300, 240, Math.min(720, maxWidth));
   spotlight.style.width = `${nextWidth}px`;
+  spotlightSplitter.setAttribute("aria-valuemax", String(Math.min(720, maxWidth)));
+  spotlightSplitter.setAttribute("aria-valuenow", String(Math.round(nextWidth)));
   localStorage.setItem("opendriveviewer_width", String(Math.round(nextWidth)));
   scheduleSpotlightMapResize();
 }
@@ -919,6 +920,7 @@ function updateSpotlightSideControls(side) {
 function setSpotlightSide(side, persist = true) {
   const nextSide = side === "left" ? "left" : "right";
   spotlight.dataset.side = nextSide;
+  document.body.dataset.spotlightSide = nextSide;
   updateSpotlightSideControls(nextSide);
   if (persist) {
     localStorage.setItem(SPOTLIGHT_SIDE_STORAGE_KEY, nextSide);
@@ -3354,6 +3356,7 @@ basemapSelect.addEventListener("change", () => changeBasemap(basemapSelect.value
 basemapFallbackNoticeClose.addEventListener("click", hideBasemapFallbackNotice);
 spotlightToggle.addEventListener("click", () => {
   const collapsed = spotlight.classList.toggle("collapsed");
+  spotlightSplitter.hidden = collapsed;
   spotlightToggle.textContent = collapsed ? "+" : "-";
   spotlightToggle.title = collapsed ? "Unfold panel" : "Fold panel";
   spotlightToggle.setAttribute("aria-label", spotlightToggle.title);
@@ -3361,54 +3364,42 @@ spotlightToggle.addEventListener("click", () => {
 });
 spotlightDockLeft.addEventListener("click", () => setSpotlightSide("left"));
 spotlightDockRight.addEventListener("click", () => setSpotlightSide("right"));
-function startRightResize(event) {
-  if (getSpotlightSide() !== "left") return;
+function startSpotlightResize(event) {
+  const side = getSpotlightSide();
+  if (!side || spotlight.classList.contains("collapsed")) return;
   event.preventDefault();
   event.stopPropagation();
   const rect = spotlight.getBoundingClientRect();
   const startX = event.clientX;
   const startWidth = rect.width;
-  spotlightResizeHandleRight.setPointerCapture(event.pointerId);
+  const direction = side === "left" ? 1 : -1;
+  spotlightSplitter.setPointerCapture(event.pointerId);
 
   const onPointerMove = (moveEvent) => {
-    const nextWidth = startWidth + moveEvent.clientX - startX;
+    const nextWidth = startWidth + direction * (moveEvent.clientX - startX);
     setSpotlightWidth(nextWidth);
   };
   const onPointerUp = () => {
-    spotlightResizeHandleRight.removeEventListener("pointermove", onPointerMove);
-    spotlightResizeHandleRight.removeEventListener("pointerup", onPointerUp);
-    spotlightResizeHandleRight.removeEventListener("pointercancel", onPointerUp);
+    spotlightSplitter.removeEventListener("pointermove", onPointerMove);
+    spotlightSplitter.removeEventListener("pointerup", onPointerUp);
+    spotlightSplitter.removeEventListener("pointercancel", onPointerUp);
   };
-  spotlightResizeHandleRight.addEventListener("pointermove", onPointerMove);
-  spotlightResizeHandleRight.addEventListener("pointerup", onPointerUp);
-  spotlightResizeHandleRight.addEventListener("pointercancel", onPointerUp);
+  spotlightSplitter.addEventListener("pointermove", onPointerMove);
+  spotlightSplitter.addEventListener("pointerup", onPointerUp);
+  spotlightSplitter.addEventListener("pointercancel", onPointerUp);
 }
 
-function startLeftResize(event) {
-  if (getSpotlightSide() !== "right") return;
+function resizeSpotlightWithKeyboard(event) {
+  if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
   event.preventDefault();
-  event.stopPropagation();
-  const rect = spotlight.getBoundingClientRect();
-  const startX = event.clientX;
-  const startWidth = rect.width;
-  spotlightResizeHandleLeft.setPointerCapture(event.pointerId);
-
-  const onPointerMove = (moveEvent) => {
-    const dx = moveEvent.clientX - startX;
-    setSpotlightWidth(startWidth - dx);
-  };
-  const onPointerUp = () => {
-    spotlightResizeHandleLeft.removeEventListener("pointermove", onPointerMove);
-    spotlightResizeHandleLeft.removeEventListener("pointerup", onPointerUp);
-    spotlightResizeHandleLeft.removeEventListener("pointercancel", onPointerUp);
-  };
-  spotlightResizeHandleLeft.addEventListener("pointermove", onPointerMove);
-  spotlightResizeHandleLeft.addEventListener("pointerup", onPointerUp);
-  spotlightResizeHandleLeft.addEventListener("pointercancel", onPointerUp);
+  const keyDirection = event.key === "ArrowRight" ? 1 : -1;
+  const sideDirection = getSpotlightSide() === "left" ? 1 : -1;
+  const currentWidth = spotlight.getBoundingClientRect().width;
+  setSpotlightWidth(currentWidth + keyDirection * sideDirection * 16);
 }
 
-spotlightResizeHandleRight.addEventListener("pointerdown", startRightResize);
-spotlightResizeHandleLeft.addEventListener("pointerdown", startLeftResize);
+spotlightSplitter.addEventListener("pointerdown", startSpotlightResize);
+spotlightSplitter.addEventListener("keydown", resizeSpotlightWithKeyboard);
 window.addEventListener("resize", () => {
   if (!spotlight.classList.contains("collapsed")) {
     setSpotlightWidth(spotlight.getBoundingClientRect().width);

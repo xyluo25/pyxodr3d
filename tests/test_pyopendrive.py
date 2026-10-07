@@ -704,6 +704,17 @@ def test_web_javascript_pins_editor_maplibre_dependency() -> None:
         assert f'from "{import_url}"' in index_javascript
 
 
+def test_web_uses_ornl_logo_as_favicon() -> None:
+    """The browser tab must use the supplied ORNL JPEG logo."""
+    repo_root = Path(__file__).resolve().parents[1]
+    web_root = repo_root / "pyxodr3d" / "web"
+    index_html = (web_root / "index.html").read_text(encoding="utf-8")
+    logo_bytes = (web_root / "ornl_logo.jpg").read_bytes()
+
+    assert '<link rel="icon" type="image/jpeg" href="./ornl_logo.jpg" />' in index_html
+    assert logo_bytes.startswith(b"\xff\xd8\xff")
+
+
 def test_web_uses_keyless_openfreemap_light_basemap() -> None:
     """The light basemap must not require API-key configuration."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -740,17 +751,56 @@ def test_web_spotlight_panel_can_dock_on_either_side() -> None:
         encoding="utf-8"
     )
     main_view_rule = index_css.partition("#main_view {")[2].partition("}")[0]
+    map_rule = index_css.partition("#map {")[2].partition("}")[0]
     spotlight_rule = index_css.partition("#spotlight {")[2].partition("}")[0]
+    splitter_rule = index_css.partition("#spotlight_splitter {")[2].partition("}")[0]
+    resize_dots_rule = index_css.partition("#spotlight_splitter::after {")[2].partition(
+        "}"
+    )[0]
 
     assert '<main id="main_view">' in index_html
+    assert '<body data-spotlight-side="right">' in index_html
+    assert 'id="spotlight_splitter"' in index_html
+    assert 'role="separator"' in index_html
     assert '<aside id="spotlight" data-side="right"' in index_html
+    assert index_html.index('id="spotlight_splitter"') < index_html.index(
+        '<aside id="spotlight"'
+    )
+    assert "spotlight_resize_handle_left" not in index_html
+    assert "spotlight_resize_handle_right" not in index_html
     assert 'id="spotlight_dock_left"' in index_html
     assert 'id="spotlight_dock_right"' in index_html
     assert "flex: 1 1 auto;" in main_view_rule
     assert "min-width: 0;" in main_view_rule
+    assert "margin: 0 !important;" in main_view_rule
+    assert "padding: 0 !important;" in main_view_rule
+    assert "border-radius: 12px;" in main_view_rule
+    assert "inset: 0;" in map_rule
+    assert "margin: 0;" in map_rule
+    assert "padding: 0;" in map_rule
+    assert "#map .maplibregl-canvas-container" in index_css
+    assert "#map .maplibregl-canvas {" in index_css
+    assert 'href="./index.css?v=20261007_middle_splitter"' in index_html
     assert "position: relative;" in spotlight_rule
     assert "flex: 0 0 auto;" in spotlight_rule
     assert "height: 100%;" in spotlight_rule
+    assert "border-radius: 12px;" in spotlight_rule
+    assert "--panel-gap" not in index_css
+    assert "gap: 0;" in index_css
+    assert "order: 1;" in splitter_rule
+    assert "flex: 0 0 16px;" in splitter_rule
+    assert "width: 16px;" in splitter_rule
+    assert "height: 100%;" in splitter_rule
+    assert 'body[data-spotlight-side="left"] #main_view' in index_css
+    assert "top: 50%;" in resize_dots_rule
+    assert "left: 50%;" in resize_dots_rule
+    assert "margin: -2px 0 0 -2px;" in resize_dots_rule
+    assert "width: 4px;" in resize_dots_rule
+    assert (
+        "box-shadow: 0 -5px 0 currentColor, 0 5px 0 currentColor;"
+        in resize_dots_rule
+    )
+    assert "#attribute_fields:not(:empty)" in index_css
     assert '#spotlight[data-side="left"]' in index_css
     assert '#spotlight[data-side="right"]' in index_css
     assert (
@@ -762,6 +812,12 @@ def test_web_spotlight_panel_can_dock_on_either_side() -> None:
     )
     assert 'spotlightDockLeft.addEventListener("click"' in index_javascript
     assert 'spotlightDockRight.addEventListener("click"' in index_javascript
+    assert "document.body.dataset.spotlightSide = nextSide;" in index_javascript
+    assert 'spotlightSplitter.addEventListener("pointerdown"' in index_javascript
+    assert 'spotlightSplitter.addEventListener("keydown"' in index_javascript
+    assert "spotlightSplitter.hidden = collapsed;" in index_javascript
+    assert "spotlightResizeHandleLeft" not in index_javascript
+    assert "spotlightResizeHandleRight" not in index_javascript
     assert "map.resize();" in index_javascript
     assert "mainView.getBoundingClientRect()" in index_javascript
     assert "setSpotlightPosition" not in index_javascript
