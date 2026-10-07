@@ -101,28 +101,32 @@ const basemaps = {
     tiles: ["https://mt0.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"],
     attribution: "&copy; Google",
   },
-  carto_light: {
-    label: "Carto Light",
-    tiles: [
-      "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-      "https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-      "https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-    ],
-    attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  openfreemap_positron: {
+    label: "OpenFreeMap Positron",
+    styleUrl: "https://tiles.openfreemap.org/styles/positron",
   },
-  carto_dark: {
-    label: "Carto Dark",
-    tiles: [
-      "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-      "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-      "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-    ],
-    attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
-  },
+  // CARTO basemaps require an API key when used outside the CARTO platform.
+  // carto_light: {
+  //   label: "Carto Light",
+  //   tiles: ["https://basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png"],
+  //   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://www.carto.com/attribution/">CARTO</a>',
+  // },
+  // carto_dark: {
+  //   label: "Carto Dark",
+  //   tiles: ["https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png"],
+  //   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://www.carto.com/attribution/">CARTO</a>',
+  // },
   esri_imagery: {
     label: "Esri Imagery",
     tiles: [
       "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    ],
+    attribution: "Tiles &copy; Esri",
+  },
+  esri_light_gray: {
+    label: "Esri Light Gray",
+    tiles: [
+      "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
     ],
     attribution: "Tiles &copy; Esri",
   },
@@ -145,6 +149,7 @@ const basemaps = {
 
 function basemapStyle(basemapId) {
   const basemap = basemaps[basemapId] || basemaps.openstreetmap;
+  if (basemap.styleUrl) return basemap.styleUrl;
   if (basemap.kind === "gridmesh") {
     return {
       version: 8,
@@ -189,6 +194,7 @@ for (const [id, basemap] of Object.entries(basemaps)) {
   option.textContent = basemap.label;
   basemapSelect.appendChild(option);
 }
+
 basemapSelect.value = "gridmesh";
 let activeBasemapId = basemapSelect.value;
 let payloadSupportsRealWorldBasemap = null;
@@ -384,59 +390,255 @@ function featureCoordinates(feature) {
   return [];
 }
 
-function laneDirectionGeoJson(geojson = currentLaneGeoJson) {
-  const features = [];
-  for (const feature of geojson?.features || []) {
-    const ring = feature.geometry?.type === "Polygon" ? feature.geometry.coordinates?.[0] : null;
-    if (!Array.isArray(ring) || ring.length < 4) continue;
-    const half = Math.floor((ring.length - 1) / 2);
-    const outerEdge = ring.slice(0, Math.max(2, half));
-    const innerEdge = ring.slice(half, ring.length - 1).reverse();
-    const pairCount = Math.min(outerEdge.length, innerEdge.length);
-    if (pairCount < 2) continue;
-    const centerline = [];
-    for (let index = 0; index < pairCount; index += 1) {
-      const outer = outerEdge[index];
-      const inner = innerEdge[index];
-      centerline.push([
-        (Number(outer[0]) + Number(inner[0])) * 0.5,
-        (Number(outer[1]) + Number(inner[1])) * 0.5,
-      ]);
+function isJunctionLane(feature) {
+  const junctionId = String(feature.properties?.junction ?? "-1").trim().toLowerCase();
+  return !["", "-1", "none", "null"].includes(junctionId);
+}
+
+function laneArrowCenterline(feature) {
+  const ring = feature.geometry?.type === "Polygon" ? feature.geometry.coordinates?.[0] : null;
+  if (!Array.isArray(ring) || ring.length < 4) return [];
+  const half = Math.floor((ring.length - 1) / 2);
+  const outerEdge = ring.slice(0, Math.max(2, half));
+  const innerEdge = ring.slice(half, ring.length - 1).reverse();
+  const pairCount = Math.min(outerEdge.length, innerEdge.length);
+  const centerline = [];
+  for (let index = 0; index < pairCount; index += 1) {
+    const outer = outerEdge[index];
+    const inner = innerEdge[index];
+    centerline.push([
+      (Number(outer[0]) + Number(inner[0])) * 0.5,
+      (Number(outer[1]) + Number(inner[1])) * 0.5,
+    ]);
+  }
+  return centerline;
+}
+
+function coordinateDeltaMeters(start, end) {
+  const centerLatitude = (Number(start[1]) + Number(end[1])) * 0.5;
+  const lonScale = Math.max(1e-9, 111_320 * Math.cos(centerLatitude * Math.PI / 180));
+  const latScale = 110_540;
+  const dx = (Number(end[0]) - Number(start[0])) * lonScale;
+  const dy = (Number(end[1]) - Number(start[1])) * latScale;
+  return { dx, dy, length: Math.hypot(dx, dy) };
+}
+
+function centerlineMetrics(centerline) {
+  const segments = [];
+  let totalLength = 0;
+  for (let index = 0; index < centerline.length - 1; index += 1) {
+    const start = centerline[index];
+    const end = centerline[index + 1];
+    const delta = coordinateDeltaMeters(start, end);
+    if (!Number.isFinite(delta.length) || delta.length <= 1e-6) continue;
+    segments.push({ start, end, ...delta });
+    totalLength += delta.length;
+  }
+  return { segments, totalLength };
+}
+
+function laneEndpointDistance(point, candidate) {
+  const start = candidate.centerline[0];
+  const end = candidate.centerline[candidate.centerline.length - 1];
+  return Math.min(
+    coordinateDeltaMeters(point, start).length,
+    coordinateDeltaMeters(point, end).length
+  );
+}
+
+function orientLaneCandidate(candidate, candidatesByKey) {
+  const props = candidate.feature.properties || {};
+  const start = candidate.centerline[0];
+  const end = candidate.centerline[candidate.centerline.length - 1];
+  let forwardScore = 0;
+  let reverseScore = 0;
+  let evidenceCount = 0;
+
+  const linkedCandidates = (propertyName) => [...new Set(propertyList(props[propertyName]).map(String))]
+    .map((laneKey) => candidatesByKey.get(laneKey))
+    .filter(Boolean);
+  for (const successor of linkedCandidates("successor_keys")) {
+    forwardScore += laneEndpointDistance(end, successor);
+    reverseScore += laneEndpointDistance(start, successor);
+    evidenceCount += 1;
+  }
+  for (const predecessor of linkedCandidates("predecessor_keys")) {
+    forwardScore += laneEndpointDistance(start, predecessor);
+    reverseScore += laneEndpointDistance(end, predecessor);
+    evidenceCount += 1;
+  }
+
+  const laneId = Number(props.lane_id);
+  const leftHandTraffic = props.left_hand_traffic === true
+    || String(props.left_hand_traffic).toLowerCase() === "true";
+  const ruleBasedForward = laneId === 0 ? true : (laneId < 0) !== leftHandTraffic;
+  const hasClearTopology = evidenceCount > 0 && Math.abs(forwardScore - reverseScore) > 0.05;
+  const forwardAlongReference = hasClearTopology ? forwardScore < reverseScore : ruleBasedForward;
+  const centerline = forwardAlongReference
+    ? candidate.centerline
+    : [...candidate.centerline].reverse();
+  return {
+    ...candidate,
+    centerline,
+    forwardAlongReference,
+    metrics: centerlineMetrics(centerline),
+  };
+}
+
+function laneRoadIdFromKey(laneKey) {
+  return String(laneKey || "").split("/", 1)[0];
+}
+
+function connectedExternalRoadIds(candidate, propertyName, candidatesByKey) {
+  const queue = propertyList(candidate.feature.properties?.[propertyName]).map(String);
+  const visited = new Set();
+  const roadIds = new Set();
+  while (queue.length > 0 && visited.size < 64) {
+    const laneKey = queue.shift();
+    if (!laneKey || visited.has(laneKey)) continue;
+    visited.add(laneKey);
+    const connected = candidatesByKey.get(laneKey);
+    if (!connected) {
+      const roadId = laneRoadIdFromKey(laneKey);
+      if (roadId) roadIds.add(roadId);
+      continue;
     }
-    const middle = Math.max(0, Math.min(centerline.length - 2, Math.floor((centerline.length - 1) / 2)));
-    const start = centerline[middle];
-    const end = centerline[middle + 1];
-    if (!start || !end) continue;
-    const dx = Number(end[0]) - Number(start[0]);
-    const dy = Number(end[1]) - Number(start[1]);
-    const length = Math.hypot(dx, dy);
-    if (!Number.isFinite(length) || length <= 1e-12) continue;
-    const ux = dx / length;
-    const uy = dy / length;
-    const px = -uy;
-    const py = ux;
-    const center = [(Number(start[0]) + Number(end[0])) * 0.5, (Number(start[1]) + Number(end[1])) * 0.5];
+    if (!isJunctionLane(connected.feature)) {
+      roadIds.add(String(connected.feature.properties?.road_id ?? laneRoadIdFromKey(laneKey)));
+      continue;
+    }
+    queue.push(...propertyList(connected.feature.properties?.[propertyName]).map(String));
+  }
+  return [...roadIds].sort();
+}
+
+function laneArrowGroupKey(candidate, candidatesByKey) {
+  const props = candidate.feature.properties || {};
+  if (isJunctionLane(candidate.feature)) {
+    const junctionId = String(props.junction);
+    const incomingRoadIds = connectedExternalRoadIds(candidate, "predecessor_keys", candidatesByKey);
+    if (incomingRoadIds.length > 0) {
+      return `junction:${junctionId}:incoming:${incomingRoadIds.join(",")}`;
+    }
+    const outgoingRoadIds = connectedExternalRoadIds(candidate, "successor_keys", candidatesByKey);
+    if (outgoingRoadIds.length > 0) {
+      return `junction:${junctionId}:outgoing:${outgoingRoadIds.join(",")}`;
+    }
+    return `junction:${junctionId}:road:${props.road_id}`;
+  }
+  const section = Number(props.lanesection_s0 || 0).toFixed(6);
+  const direction = candidate.forwardAlongReference ? "forward" : "reverse";
+  return `road:${props.road_id}:section:${section}:${direction}`;
+}
+
+function laneStraightness(candidate) {
+  const segments = candidate.metrics.segments;
+  if (segments.length < 2) return 1;
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  return (first.dx * last.dx + first.dy * last.dy) / (first.length * last.length);
+}
+
+function selectLaneArrowRepresentative(candidates) {
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.some((candidate) => isJunctionLane(candidate.feature))) {
+    return [...candidates].sort((left, right) => {
+      const straightnessDifference = laneStraightness(right) - laneStraightness(left);
+      if (Math.abs(straightnessDifference) > 1e-6) return straightnessDifference;
+      return right.metrics.totalLength - left.metrics.totalLength;
+    })[0];
+  }
+  const ordered = [...candidates].sort((left, right) => (
+    Math.abs(Number(left.feature.properties?.lane_id))
+    - Math.abs(Number(right.feature.properties?.lane_id))
+  ));
+  return ordered[Math.floor((ordered.length - 1) / 2)];
+}
+
+function centerlineArrowPlacement(candidate) {
+  const { segments, totalLength } = candidate.metrics;
+  if (segments.length === 0 || totalLength <= 0) return null;
+  const target = totalLength * 0.5;
+  let traversed = 0;
+  for (const segment of segments) {
+    if (traversed + segment.length < target) {
+      traversed += segment.length;
+      continue;
+    }
+    const ratio = Math.max(0, Math.min(1, (target - traversed) / segment.length));
+    return {
+      center: [
+        Number(segment.start[0]) + (Number(segment.end[0]) - Number(segment.start[0])) * ratio,
+        Number(segment.start[1]) + (Number(segment.end[1]) - Number(segment.start[1])) * ratio,
+      ],
+      ux: segment.dx / segment.length,
+      uy: segment.dy / segment.length,
+    };
+  }
+  return null;
+}
+
+// Direction comes from lane successors/predecessors when available, then the
+// OpenDRIVE RHT/LHT lane rule. Parallel lanes share one arrow; junction
+// connectors share one straightest representative per incoming approach.
+function laneDirectionGeoJson(geojson = currentLaneGeoJson) {
+  const rawCandidates = [];
+  for (const feature of geojson?.features || []) {
+    const laneType = String(feature.properties?.lane_type || "").trim().toLowerCase();
+    if (laneType && laneType !== "driving") continue;
+    const centerline = laneArrowCenterline(feature);
+    if (centerline.length < 2) continue;
+    rawCandidates.push({
+      feature,
+      laneKey: String(feature.properties?.lane_key || feature.id || ""),
+      centerline,
+    });
+  }
+
+  const rawCandidatesByKey = new Map(rawCandidates.map((candidate) => [candidate.laneKey, candidate]));
+  const candidates = rawCandidates.map((candidate) => orientLaneCandidate(candidate, rawCandidatesByKey));
+  const candidatesByKey = new Map(candidates.map((candidate) => [candidate.laneKey, candidate]));
+  const groups = new Map();
+  for (const candidate of candidates) {
+    const groupKey = laneArrowGroupKey(candidate, candidatesByKey);
+    if (!groups.has(groupKey)) groups.set(groupKey, []);
+    groups.get(groupKey).push(candidate);
+  }
+
+  const features = [];
+  for (const [groupKey, group] of groups) {
+    const candidate = selectLaneArrowRepresentative(group);
+    const placement = centerlineArrowPlacement(candidate);
+    if (!placement) continue;
+    const feature = candidate.feature;
     const laneWidth = Math.max(0.2, Number(feature.properties?.width) || currentLaneWidth || 3.5);
     const latScale = 110_540;
-    const lonScale = Math.max(1e-9, 111_320 * Math.cos(center[1] * Math.PI / 180));
+    const lonScale = Math.max(1e-9, 111_320 * Math.cos(placement.center[1] * Math.PI / 180));
     const scale = Math.max(0.2, Math.min(3, Number(laneArrowSize) || 1));
     const arrowLength = Math.max(0.28, Math.min(1.6, laneWidth * 0.28 * scale));
     const arrowWidth = Math.max(0.16, Math.min(1.0, laneWidth * 0.16 * scale));
-    const lengthLon = arrowLength / lonScale;
-    const lengthLat = arrowLength / latScale;
-    const widthLon = arrowWidth / lonScale;
-    const widthLat = arrowWidth / latScale;
-    const tip = [center[0] + ux * lengthLon * 0.5, center[1] + uy * lengthLat * 0.5];
-    const base = [center[0] - ux * lengthLon * 0.5, center[1] - uy * lengthLat * 0.5];
-    const left = [base[0] + px * widthLon * 0.5, base[1] + py * widthLat * 0.5];
-    const right = [base[0] - px * widthLon * 0.5, base[1] - py * widthLat * 0.5];
+    const px = -placement.uy;
+    const py = placement.ux;
+    const tip = [
+      placement.center[0] + placement.ux * arrowLength * 0.5 / lonScale,
+      placement.center[1] + placement.uy * arrowLength * 0.5 / latScale,
+    ];
+    const base = [
+      placement.center[0] - placement.ux * arrowLength * 0.5 / lonScale,
+      placement.center[1] - placement.uy * arrowLength * 0.5 / latScale,
+    ];
+    const left = [base[0] + px * arrowWidth * 0.5 / lonScale, base[1] + py * arrowWidth * 0.5 / latScale];
+    const right = [base[0] - px * arrowWidth * 0.5 / lonScale, base[1] - py * arrowWidth * 0.5 / latScale];
     features.push({
       type: "Feature",
-      id: `${feature.id || feature.properties?.lane_key || features.length}:direction`,
+      id: `${candidate.laneKey || features.length}:direction`,
       properties: {
-        lane_key: feature.properties?.lane_key || feature.id,
+        lane_key: candidate.laneKey,
         road_id: feature.properties?.road_id,
         lane_id: feature.properties?.lane_id,
+        junction: feature.properties?.junction,
+        represented_lane_count: group.length,
+        movement_group: groupKey,
       },
       geometry: {
         type: "Polygon",
@@ -1542,6 +1744,7 @@ function defaultLaneContext(geometry) {
       road_id: selectedRoad.properties?.road_id || selectedRoad.id,
       road_name: selectedRoad.properties?.name || "",
       junction: selectedRoad.properties?.junction ?? "-1",
+      left_hand_traffic: selectedRoad.properties?.left_hand_traffic ?? false,
       lane_id: -1,
       lane_type: "driving",
       level: false,

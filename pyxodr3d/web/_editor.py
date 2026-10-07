@@ -114,6 +114,7 @@ def _road_feature(odr_map: Any, road: Any, eps: float = 2.0) -> dict[str, Any]:
             "road_id": road.id,
             "name": road.name,
             "junction": road.junction,
+            "left_hand_traffic": road.left_hand_traffic,
             "length": road.length,
             "editable": True,
             "source": "pyxodr3d",
@@ -217,6 +218,7 @@ def _lane_feature(
             "road_id": road.id,
             "road_name": road.name,
             "junction": road.junction,
+            "left_hand_traffic": road.left_hand_traffic,
             "lane_key": lane_key,
             "lane_id": lane.id,
             "lane_type": lane.type,
@@ -1213,7 +1215,8 @@ class _OpenDriveViewerHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         """Serve ``/api/network`` or fall back to static files."""
-        if urlparse(self.path).path == "/api/network":
+        path = urlparse(self.path).path
+        if path == "/api/network":
             try:
                 with self.state.lock:
                     payload = self.state.as_response()

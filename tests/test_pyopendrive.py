@@ -704,6 +704,29 @@ def test_web_javascript_pins_editor_maplibre_dependency() -> None:
         assert f'from "{import_url}"' in index_javascript
 
 
+def test_web_uses_keyless_openfreemap_light_basemap() -> None:
+    """The light basemap must not require API-key configuration."""
+    repo_root = Path(__file__).resolve().parents[1]
+    index_javascript = (repo_root / "pyxodr3d" / "web" / "index.js").read_text(
+        encoding="utf-8"
+    )
+    editor_source = (repo_root / "pyxodr3d" / "web" / "_editor.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "openfreemap_positron: {" in index_javascript
+    assert (
+        'styleUrl: "https://tiles.openfreemap.org/styles/positron"'
+        in index_javascript
+    )
+    assert "if (basemap.styleUrl) return basemap.styleUrl;" in index_javascript
+    assert "// carto_light: {" in index_javascript
+    assert "// carto_dark: {" in index_javascript
+    assert "CARTO_BASEMAP_API_KEY" not in index_javascript
+    assert "CARTO_BASEMAP_API_KEY" not in editor_source
+    assert 'path == "/api/config"' not in editor_source
+
+
 def test_web_spotlight_panel_can_dock_on_either_side() -> None:
     """The full-height viewer sidebar must sit outside the main map view."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -779,6 +802,44 @@ def test_web_basemap_fallback_requires_invalid_projection() -> None:
     assert 'map.on("error", handleBasemapRenderError)' not in index_javascript
     assert "isActiveBasemapRenderError" not in index_javascript
     assert "basemapFallbackNoticeClose.addEventListener" in index_javascript
+
+
+def test_web_lane_arrows_use_connected_representative_movements() -> None:
+    """Lane arrows must use topology and collapse redundant lane polygons."""
+    repo_root = Path(__file__).resolve().parents[1]
+    index_javascript = (repo_root / "pyxodr3d" / "web" / "index.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "orientLaneCandidate(candidate, rawCandidatesByKey)" in index_javascript
+    assert "function laneArrowCenterline(feature)" in index_javascript
+    assert index_javascript.count("function laneCenterline(feature)") == 1
+    assert (
+        'connectedExternalRoadIds(candidate, "predecessor_keys", candidatesByKey)'
+        in index_javascript
+    )
+    assert "selectLaneArrowRepresentative(group)" in index_javascript
+    assert 'laneType && laneType !== "driving"' in index_javascript
+    assert "represented_lane_count: group.length" in index_javascript
+
+
+def test_lane_geojson_exports_traffic_side(
+    synthetic_map: odr.OpenDriveMap, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lane payloads must preserve RHT/LHT for direction fallback."""
+    from pyxodr3d.web._editor import _map_to_lane_geojson
+
+    monkeypatch.setattr(synthetic_map, "convertXY2LonLat", lambda x, y: (x, y))
+    features = _map_to_lane_geojson(synthetic_map)["features"]
+    traffic_side_by_road = {
+        str(feature["properties"]["road_id"]): feature["properties"][
+            "left_hand_traffic"
+        ]
+        for feature in features
+    }
+
+    assert traffic_side_by_road["1"] is False
+    assert traffic_side_by_road["2"] is True
 
 
 @pytest.mark.skip(reason="Skipping test for now")

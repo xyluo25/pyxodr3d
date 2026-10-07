@@ -7,7 +7,19 @@
 - Add controls to dock the OpenDrive 3D Viewer panel as a full-height left or
   right sidebar outside the map, with persistent side and width settings.
 
+### Changed
+
+- Comment out CARTO Light and Dark because they require an external API key,
+  and add the keyless OpenFreeMap Positron vector style as a light basemap.
+
+- Reduce lane-arrow clutter by grouping parallel lanes by travel direction and
+  junction connectors by incoming approach, orienting each representative
+  arrow from predecessor/successor geometry with an RHT/LHT fallback.
+
 ### Fixed
+
+- Prevent the web viewer from remaining on its loading screen because the lane
+  arrow optimization duplicated an existing module-level helper name.
 
 - Fall back to Grid Mesh with a visible explanation when source projection
   information or converted coordinates are unusable, while preserving a valid

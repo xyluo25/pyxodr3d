@@ -132,15 +132,25 @@ Return value:
 - URL string for the viewer. In blocking mode, the URL is also printed before
   the server starts handling requests.
 
+### Keyless Light Basemap
+
+`OpenFreeMap Positron` provides a light MapLibre vector style without an API
+key or registration. The public service requires attribution, which MapLibre
+reads from the hosted style. OpenFreeMap does not provide an SLA for the free
+public instance.
+
 ## Main Capabilities
 
 - Loads OpenDRIVE through `pyxodr3d`.
 - Converts road, lane, signal, post, and mast-arm geometry to lon/lat with
   `convertXY2LonLat`.
 - Displays lane-level polygons on a MapLibre world map.
-- Supports basemaps including OpenStreetMap, Google road/satellite, Carto,
-  Esri, OpenTopoMap, OSM HOT, and a local `Grid Mesh` basemap similar to the
-  original grid-style OpenDRIVE view.
+- Shows topology-aware lane direction arrows: one representative arrow per
+  carriageway section and one straightest connected movement per incoming
+  junction approach, using predecessor/successor links before RHT/LHT rules.
+- Supports basemaps including OpenStreetMap, Google road/satellite,
+  OpenFreeMap Positron, Esri, OpenTopoMap, and a local `Grid Mesh` basemap
+  similar to the original grid-style OpenDRIVE view.
 - Automatically uses `Grid Mesh` and displays a dismissible notice when the
   source lacks usable projection information or its converted coordinates
   cannot be placed on a real-world map. Transient raster tile failures do not
