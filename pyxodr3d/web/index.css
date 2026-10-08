@@ -224,7 +224,7 @@ body[data-spotlight-side="left"] #main_view {
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
-  width: 300px;
+  width: 320px;
   height: 100%;
   min-width: 240px;
   max-width: min(720px, calc(100vw - 80px));
