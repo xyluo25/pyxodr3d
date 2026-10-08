@@ -47,6 +47,23 @@ The package depends on `sumolib` for SUMO conversion support and `pyproj`
 for OpenDRIVE coordinate conversion. To use the SUMO conversion helpers, you
 also need the SUMO `netconvert` executable available on `PATH`.
 
+Call the cross-platform setup function to check the operating system, reuse an
+existing SUMO installation when possible, or install the official
+`eclipse-sumo` package and configure `SUMO_HOME` and the persistent user
+`PATH`:
+
+```python
+import pyxodr3d as odr
+
+installation = odr.setup_netconvert()
+```
+
+The function supports Windows, Linux, and macOS. It verifies `sumo --version`
+and `netconvert --version` after setup; the SUMO `bin` directory added to
+`PATH` contains both executables. Open a new terminal afterward so it receives
+the persistent environment settings. Use `odr.setup_netconvert(check=True)`
+for a read-only check.
+
 ## Tutorial
 
 <details open>
@@ -95,6 +112,27 @@ import pyxodr3d as odr
 
 odr.xodr_web_viewer()
 ```
+
+The viewer's Open button accepts OpenDRIVE `.xodr` files and SUMO `.net.xml`
+files. SUMO files are converted with `xodr_from_net_xml` before rendering.
+Generic or externally modified SUMO files require the SUMO `netconvert`
+executable on `PATH`.
+
+The Save button opens the browser's native Save As dialog with OpenDRIVE
+`.xodr` and SUMO `.net.xml` file types. Saving as SUMO exports the edited
+network through `xodr_to_net_xml`; browsers without the native picker safely
+fall back to downloading OpenDRIVE `.xodr`.
+
+SUMO exports made by pyxodr3d include a compressed, checksummed copy of the
+edited OpenDRIVE document in an XML comment that SUMO ignores. When that SUMO
+file is opened again without being modified, pyxodr3d restores the exact roads,
+lane sections, and junction connections instead of asking `netconvert` to
+reconstruct them. If another tool changes or rewrites the SUMO network, the
+checksum no longer matches and pyxodr3d safely uses normal SUMO conversion.
+The exact restore keeps every OpenDRIVE road/edge ID, junction ID, and lane ID.
+Because SUMO and OpenDRIVE use different lane-ID schemas, the intermediate SUMO
+elements also retain the source values in `pyxodr3d.original_link_id`,
+`pyxodr3d.original_node_id`, and `pyxodr3d.original_lane_id` parameters.
 
 ### Convert OpenDRIVE and SUMO files
 

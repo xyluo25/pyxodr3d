@@ -30,6 +30,11 @@ import webbrowser
 import xml.etree.ElementTree as ET
 
 from ..__xodr_reader import LaneKey, _float, _int, readXodr
+from ..__xodr_sumo import (
+    _sumo_net_has_valid_projection,
+    xodr_from_net_xml,
+    xodr_to_net_xml,
+)
 
 
 # Files served by the local web app.  ``data.xodr`` keeps the same "open a map
@@ -39,6 +44,7 @@ INDEX_HTML = WEB_DIR / "index.html"
 REPO_ROOT = WEB_DIR.parents[1]
 DEFAULT_XODR = WEB_DIR / "data.xodr"
 _ACTIVE_SERVERS: list[ThreadingHTTPServer] = []
+_METERS_PER_DEGREE = 111_319.49079327358
 
 __all__ = ["xodr_web_viewer", "run_server"]
 
@@ -55,7 +61,20 @@ def _as_lon_lat(odr_map: Any, x: float, y: float) -> tuple[float, float]:
             cache = None
     if cache is not None and key in cache:
         return cache[key]
-    lon, lat = odr_map.convertXY2LonLat(x, y)
+    projection = str(getattr(odr_map, "proj4", "") or "").strip()
+    use_local_grid = getattr(
+        odr_map,
+        "_web_use_local_grid_coordinates",
+        not projection or projection == "!",
+    )
+    if use_local_grid:
+        lon, lat = x / _METERS_PER_DEGREE, y / _METERS_PER_DEGREE
+    else:
+        try:
+            lon, lat = odr_map.convertXY2LonLat(x, y)
+        except (KeyError, RuntimeError, ValueError):
+            setattr(odr_map, "_web_use_local_grid_coordinates", True)
+            lon, lat = x / _METERS_PER_DEGREE, y / _METERS_PER_DEGREE
     result = (float(lon), float(lat))
     if cache is not None:
         cache[key] = result
@@ -74,7 +93,20 @@ def _as_xy(odr_map: Any, lon: float, lat: float) -> tuple[float, float]:
             cache = None
     if cache is not None and key in cache:
         return cache[key]
-    x, y = odr_map.convertLonLat2XY(lon, lat)
+    projection = str(getattr(odr_map, "proj4", "") or "").strip()
+    use_local_grid = getattr(
+        odr_map,
+        "_web_use_local_grid_coordinates",
+        not projection or projection == "!",
+    )
+    if use_local_grid:
+        x, y = lon * _METERS_PER_DEGREE, lat * _METERS_PER_DEGREE
+    else:
+        try:
+            x, y = odr_map.convertLonLat2XY(lon, lat)
+        except (KeyError, RuntimeError, ValueError):
+            setattr(odr_map, "_web_use_local_grid_coordinates", True)
+            x, y = lon * _METERS_PER_DEGREE, lat * _METERS_PER_DEGREE
     result = (float(x), float(y))
     if cache is not None:
         cache[key] = result
@@ -1595,12 +1627,20 @@ class _ViewerState:
         start = time.perf_counter()
         source_path = Path(xodr_path)
         loaded_map = readXodr(source_path)
+        return self._install_loaded_map(source_path, loaded_map, start)
+
+    def _install_loaded_map(
+        self,
+        source_path: Path,
+        loaded_map: Any,
+        started_at: float,
+    ) -> dict[str, Any]:
+        """Install one parsed map and create its complete browser response."""
         self.current_file = source_path
         self.current_map = loaded_map
+        self.last_load_seconds = time.perf_counter() - started_at
         response = self.as_response()
         self._lane_preview_map = deepcopy(loaded_map)
-        self.last_load_seconds = time.perf_counter() - start
-        response["server_load_seconds"] = self.last_load_seconds
         return response
 
     def load_text(
@@ -1608,10 +1648,52 @@ class _ViewerState:
         file_text: str,
         filename: str = "network.xodr",
     ) -> dict[str, Any]:
-        """Load an uploaded browser file through a temporary local copy."""
-        target = Path(self.tmp_dir.name) / Path(filename).name
+        """Load an uploaded OpenDRIVE file or convert a SUMO network first."""
+        uploaded_name = Path(filename).name
+        lowercase_name = uploaded_name.casefold()
+        if lowercase_name.endswith(".net.xml"):
+            source_format = "sumo_net_xml"
+        elif lowercase_name.endswith(".xodr"):
+            source_format = "opendrive"
+        else:
+            raise ValueError(
+                "Only OpenDRIVE .xodr and SUMO .net.xml files are supported."
+            )
+
+        target = Path(self.tmp_dir.name) / uploaded_name
         target.write_text(file_text, encoding="utf-8")
-        return self.load_path(target)
+        source_projection_valid = None
+        if source_format == "opendrive":
+            response = self.load_path(target)
+        else:
+            source_projection_valid = _sumo_net_has_valid_projection(target)
+            converted_stem = uploaded_name[:-len(".net.xml")] or "network"
+            converted_name = f"{converted_stem}.xodr"
+            converted_path = Path(self.tmp_dir.name) / converted_name
+            started_at = time.perf_counter()
+            converted_map = xodr_from_net_xml(
+                net_file=target,
+                xodr_file=converted_path,
+            )
+            response = self._install_loaded_map(
+                converted_path,
+                converted_map,
+                started_at,
+            )
+            response["sumo_conversion_mode"] = getattr(
+                converted_map,
+                "sumo_conversion_mode",
+                "netconvert",
+            )
+            response["identifiers_preserved"] = bool(
+                getattr(converted_map, "identifiers_preserved", False)
+            )
+
+        response["source_filename"] = uploaded_name
+        response["source_format"] = source_format
+        response["source_projection_valid"] = source_projection_valid
+        response["source_file_size_bytes"] = target.stat().st_size
+        return response
 
     def reload_current(self) -> dict[str, Any]:
         """Reload the current source file with the standard parser behavior."""
@@ -1860,10 +1942,17 @@ class _ViewerState:
         geojson: dict[str, Any],
         lane_geojson: dict[str, Any] | None = None,
         signal_geojson: dict[str, Any] | None = None,
+        *,
+        output_format: str = "xodr",
     ) -> dict[str, Any]:
-        """Save browser edits to XML, reload them, and return fresh map data."""
+        """Save edits and return an OpenDRIVE or converted SUMO download."""
         if self.current_map is None:
             raise RuntimeError("No OpenDRIVE map is loaded.")
+        normalized_format = str(output_format).casefold()
+        if normalized_format not in {"xodr", "sumo_net_xml"}:
+            raise ValueError(
+                "Save format must be 'xodr' or 'sumo_net_xml'."
+            )
         _apply_geojson_edits(self.current_map, geojson)
         if lane_geojson is not None:
             _apply_lane_geojson_edits(self.current_map, lane_geojson)
@@ -1874,16 +1963,25 @@ class _ViewerState:
                 update_objects=True,
                 update_signals=True,
             )
-        target = Path(self.tmp_dir.name) / "edited_network.xodr"
-        self.current_map.saveXodr(target)
-        self.current_map = readXodr(target)
-        self.current_file = target
+        xodr_target = Path(self.tmp_dir.name) / "edited_network.xodr"
+        self.current_map.saveXodr(xodr_target)
+        xodr_text = xodr_target.read_text(encoding="utf-8")
+        if normalized_format == "sumo_net_xml":
+            download_target = Path(self.tmp_dir.name) / "edited_network.net.xml"
+            xodr_to_net_xml(xodr_target, net_file=download_target)
+        else:
+            download_target = xodr_target
+
+        self.current_map = readXodr(xodr_target)
+        self.current_file = xodr_target
         response = self.as_response()
         self._lane_preview_map = deepcopy(self.current_map)
         return {
             **response,
-            "xodr": target.read_text(encoding="utf-8"),
-            "saved_filename": target.name,
+            "xodr": xodr_text,
+            "download_text": download_target.read_text(encoding="utf-8"),
+            "saved_filename": download_target.name,
+            "saved_format": normalized_format,
         }
 
     def browser_open(self, session_id: str, server: ThreadingHTTPServer) -> None:
@@ -1990,6 +2088,7 @@ class _OpenDriveViewerHandler(SimpleHTTPRequestHandler):
                         payload.get("geojson") or {},
                         payload.get("lane_geojson"),
                         payload.get("signal_geojson"),
+                        output_format=str(payload.get("save_format") or "xodr"),
                     )
                 elif path == "/api/browser-open":
                     self.state.browser_open(str(payload.get("session_id") or ""), self.server)

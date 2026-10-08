@@ -29,6 +29,15 @@ jobs:
           allow-prereleases: true
           cache: pip
 
+      - name: Install SUMO
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes sumo sumo-tools
+          echo "SUMO_HOME=/usr/share/sumo" >> "$GITHUB_ENV"
+          sumo --version
+          netconvert --version
+          test -f /usr/share/sumo/tools/randomTrips.py
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

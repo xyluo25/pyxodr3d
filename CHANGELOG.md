@@ -1,11 +1,34 @@
 # Changelog
 
+## 2026-10-08
+
+### Changed
+
+- Expose the SUMO and `netconvert` environment setup as the public
+  `pyxodr3d.setup_netconvert()` function from `pyxodr3d.__init__`.
+
+- Install SUMO and its command-line tools in GitHub Actions, export
+  `SUMO_HOME`, and verify `sumo`, `netconvert`, and `randomTrips.py`
+  before running the complete Python-version test matrix.
+
 ## 2026-10-07
 
 ### Added
 
 - Add controls to dock the OpenDrive 3D Viewer panel as a full-height left or
   right sidebar outside the map, with persistent side and width settings.
+
+- Add cross-platform SUMO setup support that detects Windows, Linux, or macOS;
+  reuses or installs SUMO; persists `SUMO_HOME` and its `bin` directory on
+  the user `PATH`; and verifies both required executables.
+
+- Allow the web viewer Open button to load `.xodr` files directly or convert
+  SUMO `.net.xml` files with `xodr_from_net_xml` before rendering. The file
+  picker and server reject other XML formats with a clear error.
+
+- Add native Save As file-type choices for OpenDRIVE `.xodr` and SUMO
+  `.net.xml`, removing the extra toolbar dropdown while retaining
+  `xodr_to_net_xml` conversion for SUMO exports.
 
 - Add a checked-by-default Road Shoulder view option that hides or restores
   OpenDRIVE shoulder lane fills and borders without reparsing the network.
@@ -44,6 +67,27 @@
   arrow from predecessor/successor geometry with an RHT/LHT fallback.
 
 ### Fixed
+
+- Preserve exact OpenDRIVE roads, lane sections, lane types, and junction
+  connectors across pyxodr3d `.xodr` to `.net.xml` to `.xodr` round trips by
+  embedding a compressed, checksummed OpenDRIVE snapshot in the SUMO XML.
+  Unchanged exports restore the snapshot without topology loss, while modified
+  or generic SUMO files safely fall back to `netconvert`. The viewer now reports
+  whether it restored or converted the network and labels source and generated
+  file sizes correctly. Road/edge, junction, and qualified lane identifiers are
+  covered by a separate integrity checksum and full round-trip regression test;
+  their original values are also retained in SUMO parameters.
+
+- Preserve normalized OpenDRIVE projection metadata in SUMO exports so saved
+  `.net.xml` files reload without a missing `netOffset` failure. Projection
+  metadata must pass CRS and coordinate validation; incomplete OpenDRIVE
+  metadata is no longer completed using assumed parameters, and invalid SUMO
+  projections explicitly select Grid Mesh. Native Save As output is written
+  before refreshing the map so valid `.xodr` content is not left empty when a
+  later viewer refresh fails.
+
+- Balance the loading-overlay lifecycle when opening `.xodr` or converting
+  `.net.xml` files so the completed map is not left behind a loading screen.
 
 - Declare `pyproj` as a runtime dependency and enable every previously
   skipped coordinate, web-server, dragged-lane, tutorial, and SUMO conversion

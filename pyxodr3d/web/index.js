@@ -393,6 +393,12 @@ function isNullIslandScale(samples) {
 }
 
 function payloadHasRealWorldLonLat(payload) {
+  if (
+    payload?.source_format === "sumo_net_xml"
+    && payload?.source_projection_valid !== true
+  ) {
+    return false;
+  }
   const proj4Text = String(payload?.proj4 || "").trim();
   if (!hasUsableProjection(proj4Text)) return false;
 
@@ -3637,14 +3643,30 @@ async function calculateRoute() {
   }
 }
 
+function uploadedNetworkFormat(filename) {
+  const lowercaseName = String(filename || "").toLowerCase();
+  if (lowercaseName.endsWith(".net.xml")) return "sumo_net_xml";
+  if (lowercaseName.endsWith(".xodr")) return "opendrive";
+  return null;
+}
+
 async function openXodrFile(file) {
   if (!file) return;
+  const sourceFormat = uploadedNetworkFormat(file.name);
+  if (!sourceFormat) {
+    setStatus("Choose an OpenDRIVE .xodr or SUMO .net.xml file.", true);
+    return;
+  }
   const startedAt = performance.now();
   showLoadingOverlay(`Reading ${file.name} (${formatFileSize(file.size)})...`);
   try {
     setStatus(`Reading ${file.name} (${formatFileSize(file.size)})...`);
     const text = await file.text();
-    setStatus(`Loading ${file.name} into OpenDRIVE map...`);
+    const loadingMessage = sourceFormat === "sumo_net_xml"
+      ? `Converting SUMO network ${file.name} to OpenDRIVE...`
+      : `Loading OpenDRIVE network ${file.name}...`;
+    setLoadingOverlayMessage(loadingMessage);
+    setStatus(loadingMessage);
     const payload = await requestJson("/api/load-xodr", {
       method: "POST",
       body: JSON.stringify({
@@ -3653,7 +3675,21 @@ async function openXodrFile(file) {
       }),
     });
     const installed = await loadPayload(payload);
-    if (installed) setStatus(loadSummary(payload, elapsedSeconds(startedAt), payloadFileSize(payload, file.size)));
+    if (installed) {
+      const sourceFileSize = Number(payload.source_file_size_bytes) || file.size;
+      const sourceDescription = `${payload.source_filename || file.name} `
+        + `(${formatFileSize(sourceFileSize)})`;
+      let conversionSummary = "";
+      if (payload.source_format === "sumo_net_xml") {
+        conversionSummary = payload.sumo_conversion_mode === "embedded_opendrive"
+          ? `Restored the exact embedded OpenDRIVE data from ${sourceDescription}. `
+            + "Road/edge, junction, and lane IDs were preserved. "
+          : `Converted ${sourceDescription} to ${payload.filename}. `;
+      }
+      setStatus(
+        `${conversionSummary}${loadSummary(payload, elapsedSeconds(startedAt), payloadFileSize(payload))}`,
+      );
+    }
   } catch (error) {
     console.error(error);
     setStatus(`Failed to load ${file.name}: ${errorMessage(error)}`, true);
@@ -3662,21 +3698,82 @@ async function openXodrFile(file) {
   }
 }
 
-// Save sends all editable collections.  The server decides which fields
-// can safely be written to OpenDRIVE XML and returns a refreshed payload.
+function saveFormatForFilename(filename) {
+  const lowercaseName = String(filename || "").toLowerCase();
+  if (lowercaseName.endsWith(".net.xml")) return "sumo_net_xml";
+  if (lowercaseName.endsWith(".xodr")) return "xodr";
+  return null;
+}
+
+async function chooseNetworkSaveTarget() {
+  if (typeof window.showSaveFilePicker !== "function") return null;
+  const fileHandle = await window.showSaveFilePicker({
+    id: "pyxodr3d-network-save",
+    suggestedName: "edited_network.xodr",
+    types: [
+      {
+        description: "OpenDRIVE File (*.xodr)",
+        accept: { "application/xml": [".xodr"] },
+      },
+      {
+        description: "SUMO Network File (*.net.xml)",
+        accept: { "application/xml": [".net.xml"] },
+      },
+    ],
+    excludeAcceptAllOption: true,
+  });
+  const saveFormat = saveFormatForFilename(fileHandle.name);
+  if (!saveFormat) {
+    throw new Error("Save filename must end with .xodr or .net.xml.");
+  }
+  return { fileHandle, filename: fileHandle.name, saveFormat };
+}
+
+async function writeTextFile(fileHandle, text) {
+  const writable = await fileHandle.createWritable();
+  await writable.write(text);
+  await writable.close();
+}
+
+// Save always refreshes the editor from OpenDRIVE. The native Save As file type
+// controls whether the selected file receives OpenDRIVE or converted SUMO XML.
 async function saveEditedXodr() {
-  showLoadingOverlay("Saving edited OpenDRIVE network...");
-  setStatus("Saving edited OpenDRIVE network...");
+  let saveTarget = null;
+  try {
+    saveTarget = await chooseNetworkSaveTarget();
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    throw error;
+  }
+  const saveFormat = saveTarget?.saveFormat || "xodr";
+  const savingMessage = saveFormat === "sumo_net_xml"
+    ? "Saving edited OpenDRIVE network and converting it to SUMO..."
+    : "Saving edited OpenDRIVE network...";
+  showLoadingOverlay(savingMessage);
+  setStatus(savingMessage);
   try {
     const savePayload = syncBeforeSave();
+    savePayload.save_format = saveFormat;
     const payload = await requestJson("/api/save-xodr", {
       method: "POST",
       body: JSON.stringify(savePayload),
     });
-    currentFilename = payload.saved_filename || `edited_${currentFilename}`;
+    const downloadFilename = saveTarget?.filename
+      || payload.saved_filename
+      || `edited_${currentFilename}`;
+    const downloadContent = payload.download_text || payload.xodr;
+    if (saveTarget) {
+      await writeTextFile(saveTarget.fileHandle, downloadContent);
+    } else {
+      downloadText(downloadFilename, downloadContent);
+    }
     await loadPayload(payload);
-    downloadText(currentFilename, payload.xodr);
-    setStatus(`Saved ${currentFilename} from ${payload.geojson.features.length} edited roads and refreshed ${payload.lane_geojson.features.length} lanes plus ${(payload.signal_geojson?.features.length || 0)} signals.`);
+    const signalCount = payload.signal_geojson?.features.length || 0;
+    setStatus(
+      `Saved ${downloadFilename} from ${payload.geojson.features.length} edited roads `
+      + `and refreshed ${payload.lane_geojson.features.length} lanes plus `
+      + `${signalCount} signals.`,
+    );
   } finally {
     hideLoadingOverlay();
   }

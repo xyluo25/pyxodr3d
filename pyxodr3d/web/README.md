@@ -1,7 +1,8 @@
 # OpenDRIVE Web Editor
 
-This folder contains the browser editor for OpenDRIVE `.xodr` files. The current
-viewer is a Python-backed MapLibre GL application powered by `pyxodr3d`.
+This folder contains the browser editor for OpenDRIVE `.xodr` files and SUMO
+`.net.xml` networks. The current viewer is a Python-backed MapLibre GL
+application powered by `pyxodr3d`.
 
 ## Files
 
@@ -30,6 +31,28 @@ http://127.0.0.1:8765/
 The default map is `pyxodr3d/web/data.xodr`. The page calls
 `/api/network` on startup, and the Python server returns the default network as
 MapLibre-ready GeoJSON.
+
+The Open button accepts only `.xodr` and `.net.xml`. OpenDRIVE files are parsed
+directly. SUMO networks are converted with `xodr_from_net_xml` and then rendered
+from the generated OpenDRIVE map. Generic or externally modified SUMO files
+require the `netconvert` executable from SUMO to be available on `PATH`.
+
+The Save button opens the browser's native Save As dialog with OpenDRIVE
+`.xodr` and SUMO `.net.xml` file types. Selecting SUMO converts the edited
+OpenDRIVE file with `xodr_to_net_xml` before writing it. Browsers without the
+native picker safely fall back to an OpenDRIVE `.xodr` download. The editor
+continues using the refreshed `.xodr` map after either export.
+
+The SUMO export carries a compressed, checksummed OpenDRIVE snapshot in an XML
+comment ignored by SUMO. Reloading an unchanged pyxodr3d export restores that
+snapshot exactly, including junction connector lanes. If the SUMO network is
+modified or rewritten, checksum validation rejects the stale snapshot and the
+viewer falls back to normal `netconvert` reconstruction.
+The restored OpenDRIVE road/edge, junction, and qualified lane IDs are verified
+independently. Their source values are retained on intermediate SUMO elements
+as `pyxodr3d.original_link_id`, `pyxodr3d.original_node_id`, and
+`pyxodr3d.original_lane_id` parameters because SUMO uses a different lane-ID
+format.
 
 ### Command Line Arguments
 
@@ -141,7 +164,10 @@ public instance.
 
 ## Main Capabilities
 
-- Loads OpenDRIVE through `pyxodr3d`.
+- Loads OpenDRIVE directly through `pyxodr3d`, or converts SUMO `.net.xml`
+  networks through `xodr_from_net_xml` before rendering.
+- Saves `.xodr` by default and optionally exports SUMO `.net.xml` through
+  `xodr_to_net_xml`.
 - Converts road, lane, signal, post, and mast-arm geometry to lon/lat with
   `convertXY2LonLat`.
 - Displays lane-level polygons on a MapLibre world map.

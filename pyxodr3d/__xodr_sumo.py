@@ -26,14 +26,25 @@ Attributes:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
+import gzip
+import hashlib
+import io
+import math
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 from typing import Any, Mapping, Sequence, TYPE_CHECKING
 import xml.etree.ElementTree as ET
+
+from pyproj import CRS, Proj
+from pyproj.exceptions import CRSError, ProjError
+
 from . import OpenDriveMap, readXodr
+from .__xodr_reader import _projection_for_sumo
 
 if TYPE_CHECKING:
     import sumolib.net
@@ -43,6 +54,51 @@ _TEMP_DIR_ATTR = "_pyxodr3d_temp_dir"
 _ORIGINAL_NODE_ID_PARAM = "pyxodr3d.original_node_id"
 _ORIGINAL_LINK_ID_PARAM = "pyxodr3d.original_link_id"
 _ORIGINAL_LANE_ID_PARAM = "pyxodr3d.original_lane_id"
+_SNAPSHOT_COMMENT_START = b"<!--pyxodr3d-opendrive-snapshot-v1 "
+_SNAPSHOT_COMMENT_END = b"\n-->"
+_MAX_EMBEDDED_XODR_BYTES = 100 * 1024 * 1024
+
+
+def _xml_sha256(xml_bytes: bytes) -> str:
+    """Return a stable XML checksum that ignores formatting and comments."""
+    canonical_xml = ET.canonicalize(
+        xml_data=xml_bytes,
+        strip_text=True,
+        with_comments=False,
+    )
+    return hashlib.sha256(canonical_xml.encode("utf-8")).hexdigest()
+
+
+def _opendrive_identifier_sha256(root: ET.Element) -> str:
+    """Hash road, junction, and qualified lane IDs without ambiguity."""
+    digest = hashlib.sha256()
+
+    def update_identifier(*values: str) -> None:
+        for value in values:
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, byteorder="big"))
+            digest.update(encoded)
+
+    for road in root.findall("road"):
+        road_id = road.get("id", "")
+        update_identifier("road", road_id)
+        for section_index, lane_section in enumerate(
+            road.findall("./lanes/laneSection")
+        ):
+            section_s = lane_section.get("s", "")
+            for side in ("left", "center", "right"):
+                for lane in lane_section.findall(f"./{side}/lane"):
+                    update_identifier(
+                        "lane",
+                        road_id,
+                        str(section_index),
+                        section_s,
+                        side,
+                        lane.get("id", ""),
+                    )
+    for junction in root.findall("junction"):
+        update_identifier("junction", junction.get("id", ""))
+    return digest.hexdigest()
 
 
 def _require_sumolib():
@@ -104,6 +160,115 @@ def _make_output_path(path: str | Path | None, suffix: str) -> tuple[Path, str |
     return Path(temp_dir) / suffix, temp_dir
 
 
+def _embed_opendrive_snapshot(xodr_file: Path, net_file: Path) -> None:
+    """Embed an exact, checksummed OpenDRIVE snapshot in a SUMO XML comment.
+
+    SUMO and ``sumolib`` ignore XML comments, so the network remains a normal
+    ``.net.xml`` file. The snapshot lets pyxodr3d reverse its own export
+    without asking ``netconvert`` to reconstruct and simplify junction lanes.
+    """
+    xodr_bytes = xodr_file.read_bytes()
+    xodr_root = ET.fromstring(xodr_bytes)
+    if str(xodr_root.tag).rsplit("}", maxsplit=1)[-1] != "OpenDRIVE":
+        raise ValueError(f"Expected an OpenDRIVE document: {xodr_file}")
+
+    net_bytes = net_file.read_bytes()
+    closing_tag_index = net_bytes.rfind(b"</net>")
+    if closing_tag_index < 0:
+        raise ValueError(f"Expected a SUMO <net> document: {net_file}")
+
+    compressed = gzip.compress(xodr_bytes, compresslevel=9, mtime=0)
+    encoded = base64.b64encode(compressed)
+    encoded_lines = b"\n".join(
+        encoded[index : index + 120]
+        for index in range(0, len(encoded), 120)
+    )
+    metadata = (
+        f"sumo-sha256={_xml_sha256(net_bytes)} "
+        f"xodr-sha256={hashlib.sha256(xodr_bytes).hexdigest()} "
+        f"id-sha256={_opendrive_identifier_sha256(xodr_root)} "
+        f"size={len(xodr_bytes)} encoding=gzip+base64"
+    ).encode("ascii")
+    comment = (
+        _SNAPSHOT_COMMENT_START
+        + metadata
+        + b"\n"
+        + encoded_lines
+        + _SNAPSHOT_COMMENT_END
+    )
+    net_file.write_bytes(
+        net_bytes[:closing_tag_index] + comment + net_bytes[closing_tag_index:]
+    )
+
+
+def _embedded_opendrive_snapshot(net_file: Path) -> bytes | None:
+    """Return a valid embedded OpenDRIVE snapshot for an unchanged SUMO net."""
+    try:
+        net_bytes = net_file.read_bytes()
+    except OSError:
+        return None
+
+    comment_start = net_bytes.find(_SNAPSHOT_COMMENT_START)
+    if comment_start < 0:
+        return None
+    comment_end = net_bytes.find(_SNAPSHOT_COMMENT_END, comment_start)
+    if comment_end < 0:
+        return None
+
+    body_start = comment_start + len(_SNAPSHOT_COMMENT_START)
+    comment_body = net_bytes[body_start:comment_end]
+    metadata_line, separator, encoded = comment_body.partition(b"\n")
+    if not separator:
+        return None
+    try:
+        metadata = dict(
+            field.split("=", maxsplit=1)
+            for field in metadata_line.decode("ascii").split()
+        )
+        expected_size = int(metadata["size"])
+    except (KeyError, UnicodeDecodeError, ValueError):
+        return None
+    if (
+        metadata.get("encoding") != "gzip+base64"
+        or expected_size <= 0
+        or expected_size > _MAX_EMBEDDED_XODR_BYTES
+    ):
+        return None
+
+    base_net_bytes = (
+        net_bytes[:comment_start]
+        + net_bytes[comment_end + len(_SNAPSHOT_COMMENT_END) :]
+    )
+    try:
+        sumo_checksum = _xml_sha256(base_net_bytes)
+    except (ET.ParseError, TypeError, ValueError):
+        return None
+    if sumo_checksum != metadata.get("sumo-sha256"):
+        return None
+
+    try:
+        compressed = base64.b64decode(b"".join(encoded.split()), validate=True)
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as archive:
+            xodr_bytes = archive.read(expected_size + 1)
+        if len(xodr_bytes) != expected_size:
+            return None
+        if hashlib.sha256(xodr_bytes).hexdigest() != metadata.get("xodr-sha256"):
+            return None
+        xodr_root = ET.fromstring(xodr_bytes)
+    except (binascii.Error, EOFError, ET.ParseError, OSError, ValueError):
+        return None
+    if str(xodr_root.tag).rsplit("}", maxsplit=1)[-1] != "OpenDRIVE":
+        return None
+    expected_identifier_checksum = metadata.get("id-sha256")
+    if (
+        expected_identifier_checksum is not None
+        and _opendrive_identifier_sha256(xodr_root)
+        != expected_identifier_checksum
+    ):
+        return None
+    return xodr_bytes
+
+
 def xodr_to_net_xml(
     xodr_file: str | Path,
     net_file: str | Path | None = None,
@@ -132,7 +297,10 @@ def xodr_to_net_xml(
 
     Returns:
         sumolib.net.Net: The converted network object.
-            The generated SUMO net XML file is retained and its path is attached to the returned object as an attribute.
+            The generated SUMO net XML file is retained and its path is attached
+            to the returned object as an attribute. The file also contains a
+            checksummed, compressed OpenDRIVE snapshot in an XML comment for an
+            exact pyxodr3d round trip.
 
     Raises:
         RuntimeError: If ``sumolib`` or ``netconvert`` is unavailable, or if
@@ -154,7 +322,9 @@ def xodr_to_net_xml(
         command.append("--opendrive.import-all-lanes")
     _append_options(command, netconvert_options)
     _run_netconvert(command)
+    _preserve_xodr_projection(Path(xodr_file), output_file)
     _annotate_sumo_net_ids(output_file)
+    _embed_opendrive_snapshot(Path(xodr_file), output_file)
 
     read_kwargs = {"withInternal": with_internal}
     if read_options:
@@ -166,6 +336,78 @@ def xodr_to_net_xml(
     return net
 
 
+def _preserve_xodr_projection(xodr_file: Path, net_file: Path) -> None:
+    """Carry usable OpenDRIVE projection metadata into a generated SUMO net."""
+    xodr_root = ET.parse(xodr_file).getroot()
+    projection = (xodr_root.findtext("./header/geoReference") or "").strip()
+    if not projection or projection == "!":
+        return
+    try:
+        CRS.from_user_input(projection)
+    except CRSError:
+        return
+
+    net_tree = ET.parse(net_file)
+    location = net_tree.getroot().find("location")
+    if location is None:
+        return
+    sumo_projection = _projection_for_sumo(projection)
+    try:
+        CRS.from_user_input(sumo_projection)
+    except CRSError:
+        return
+    location.set("projParameter", sumo_projection)
+    _write_xml(net_tree, net_file)
+
+
+def _sumo_net_has_valid_projection(net_file: Path) -> bool:
+    """Return whether a SUMO network has usable projection and offset metadata."""
+    try:
+        location = ET.parse(net_file).getroot().find("location")
+        if location is None:
+            return False
+        projection = (location.get("projParameter") or "").strip()
+        if not projection or projection in {"!", "-"}:
+            return False
+        offset = [
+            float(value)
+            for value in (location.get("netOffset") or "").split(",")
+        ]
+        boundary = [
+            float(value)
+            for value in (location.get("convBoundary") or "").split(",")
+        ]
+        if len(offset) != 2 or len(boundary) != 4:
+            return False
+
+        coordinate_projection = Proj(CRS.from_user_input(projection))
+        projected_corners = (
+            (boundary[0] - offset[0], boundary[1] - offset[1]),
+            (boundary[2] - offset[0], boundary[3] - offset[1]),
+        )
+        lon_lat_corners = [
+            coordinate_projection(x, y, inverse=True)
+            for x, y in projected_corners
+        ]
+    except (
+        CRSError,
+        ET.ParseError,
+        OSError,
+        OverflowError,
+        ProjError,
+        TypeError,
+        ValueError,
+    ):
+        return False
+    return all(
+        math.isfinite(lon)
+        and math.isfinite(lat)
+        and -180.0 <= lon <= 180.0
+        and -85.0 <= lat <= 85.0
+        for lon, lat in lon_lat_corners
+    )
+
+
 def xodr_from_net_xml(
     net_file: str | Path | None = None,
     xodr_file: str | Path | None = None,
@@ -175,13 +417,17 @@ def xodr_from_net_xml(
     netconvert_options: Mapping[str, Any] | None = None,
     opendrive_map_kwargs: Mapping[str, Any] | None = None,
 ) -> OpenDriveMap:
-    """Convert a ``.net.xml`` file or ``sumolib.net.Net`` object to :class:`pyxodr3d.OpenDriveMap`.
+    """Convert a SUMO file or network object to an OpenDRIVE map.
 
-    ``sumolib.net.Net`` does not provide a native writer.  If ``net_file`` is not
+    Files created by :func:`xodr_to_net_xml` restore their embedded OpenDRIVE
+    snapshot when its SUMO checksum still matches. This preserves the exact
+    source roads, lane sections, and junction connectors. Generic or modified
+    SUMO networks fall back to ``netconvert`` reconstruction.
+
+    ``sumolib.net.Net`` does not provide a native writer. If ``net_file`` is not
     passed, this function first reuses the source file attached by
-    :func:`xodr_to_sumo_net`.  If no source path is available, it writes a
-    minimal SUMO net XML representation from the in-memory object and passes that
-    to ``netconvert``.
+    :func:`xodr_to_net_xml`. If no source path is available, it writes a minimal
+    SUMO net XML representation from the in-memory object.
 
     Args:
         net_file: Optional SUMO ``.net.xml`` path to use as the source for
@@ -210,21 +456,30 @@ def xodr_from_net_xml(
     source_net_file, temp_dir = _resolve_sumo_net_file(net, net_file)
     output_file, output_temp_dir = _make_output_path(xodr_file, "network.xodr")
 
-    command = [
-        _netconvert_binary(netconvert_binary),
-        "--sumo-net-file",
-        str(source_net_file),
-        "--opendrive-output",
-        str(output_file),
-    ]
-    _append_options(command, netconvert_options)
-    _run_netconvert(command)
-    _restore_opendrive_ids(output_file, source_net_file)
+    embedded_xodr = _embedded_opendrive_snapshot(source_net_file)
+    if embedded_xodr is not None:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_bytes(embedded_xodr)
+        conversion_mode = "embedded_opendrive"
+    else:
+        command = [
+            _netconvert_binary(netconvert_binary),
+            "--sumo-net-file",
+            str(source_net_file),
+            "--opendrive-output",
+            str(output_file),
+        ]
+        _append_options(command, netconvert_options)
+        _run_netconvert(command)
+        _restore_opendrive_ids(output_file, source_net_file)
+        conversion_mode = "netconvert"
 
     kwargs = dict(opendrive_map_kwargs or {})
     odr_map = readXodr(output_file, **kwargs)
     setattr(odr_map, "sumo_net_file", str(source_net_file))
     setattr(odr_map, "xodr_file", str(output_file))
+    setattr(odr_map, "sumo_conversion_mode", conversion_mode)
+    setattr(odr_map, "identifiers_preserved", embedded_xodr is not None)
     if temp_dir is not None:
         setattr(odr_map, "_pyxodr3d_sumo_temp_dir", temp_dir)
     if output_temp_dir is not None:

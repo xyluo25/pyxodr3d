@@ -20,6 +20,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pyxodr3d as odr
 
 
+def _opendrive_identifier_inventory(
+    root: ET.Element,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[tuple[str, ...], ...]]:
+    """Return road, junction, and qualified lane IDs in document order."""
+    road_ids = tuple(road.get("id", "") for road in root.findall("road"))
+    junction_ids = tuple(
+        junction.get("id", "") for junction in root.findall("junction")
+    )
+    lane_ids: list[tuple[str, ...]] = []
+    for road in root.findall("road"):
+        road_id = road.get("id", "")
+        for section_index, lane_section in enumerate(
+            road.findall("./lanes/laneSection")
+        ):
+            section_s = lane_section.get("s", "")
+            for side in ("left", "center", "right"):
+                for lane in lane_section.findall(f"./{side}/lane"):
+                    lane_ids.append(
+                        (
+                            road_id,
+                            str(section_index),
+                            section_s,
+                            side,
+                            lane.get("id", ""),
+                        )
+                    )
+    return road_ids, junction_ids, tuple(lane_ids)
+
+
 SYNTHETIC_XODR = """<?xml version="1.0" encoding="UTF-8"?>
 <OpenDRIVE>
   <header revMajor="1" revMinor="4" name="unit">
@@ -636,6 +665,9 @@ def test_web_save_persists_dragged_lane_geometry(synthetic_file: Path) -> None:
         payload["lane_geojson"],
         payload["signal_geojson"],
     )
+    assert saved["saved_filename"] == "edited_network.xodr"
+    assert saved["saved_format"] == "xodr"
+    assert saved["download_text"] == saved["xodr"]
     reloaded_lane = next(
         feature
         for feature in saved["lane_geojson"]["features"]
@@ -1372,6 +1404,289 @@ def test_xodr_web_viewer_background_thread_serves_network() -> None:
     assert len(payload["lane_geojson"]["features"]) > 0
 
 
+def test_web_open_button_accepts_only_xodr_and_sumo_net_xml() -> None:
+    """The browser picker and validation must expose only supported formats."""
+    repo_root = Path(__file__).resolve().parents[1]
+    web_root = repo_root / "pyxodr3d" / "web"
+    index_html = (web_root / "index.html").read_text(encoding="utf-8")
+    index_javascript = (web_root / "index.js").read_text(encoding="utf-8")
+
+    assert 'accept=".xodr,.net.xml"' in index_html
+    assert "Open an OpenDRIVE .xodr or SUMO .net.xml network" in index_html
+    assert "function uploadedNetworkFormat(filename)" in index_javascript
+    assert 'lowercaseName.endsWith(".net.xml")' in index_javascript
+    assert 'lowercaseName.endsWith(".xodr")' in index_javascript
+    assert "Choose an OpenDRIVE .xodr or SUMO .net.xml file." in index_javascript
+    assert "Converting SUMO network" in index_javascript
+    assert "Restored the exact embedded OpenDRIVE data" in index_javascript
+    assert "Road/edge, junction, and lane IDs were preserved." in index_javascript
+    assert "payloadFileSize(payload)" in index_javascript
+    open_file_function = index_javascript.split(
+        "async function openXodrFile(file)",
+        maxsplit=1,
+    )[1].split("function saveFormatForFilename(filename)", maxsplit=1)[0]
+    assert open_file_function.count("showLoadingOverlay(") == 1
+    assert open_file_function.count("hideLoadingOverlay();") == 1
+    assert "setLoadingOverlayMessage(loadingMessage);" in open_file_function
+
+
+def test_web_upload_loads_xodr_and_converts_sumo_net_xml(
+    synthetic_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uploads load OpenDRIVE directly and dispatch SUMO files to conversion."""
+    from pyxodr3d.web import _editor
+
+    state = _editor._ViewerState()
+    direct_response = state.load_text(
+        synthetic_file.read_text(encoding="utf-8"),
+        "direct.xodr",
+    )
+
+    assert direct_response["filename"] == "direct.xodr"
+    assert direct_response["source_filename"] == "direct.xodr"
+    assert direct_response["source_format"] == "opendrive"
+    assert direct_response["geojson"]["features"]
+
+    conversion_call: dict[str, Path] = {}
+
+    def fake_xodr_from_net_xml(
+        net_file: str | Path,
+        xodr_file: str | Path,
+    ) -> odr.OpenDriveMap:
+        net_path = Path(net_file)
+        xodr_path = Path(xodr_file)
+        conversion_call["net_file"] = net_path
+        conversion_call["xodr_file"] = xodr_path
+        assert net_path.read_text(encoding="utf-8") == "<net/>"
+        xodr_path.write_text(SYNTHETIC_XODR, encoding="utf-8")
+        return odr.readXodr(xodr_path)
+
+    monkeypatch.setattr(_editor, "xodr_from_net_xml", fake_xodr_from_net_xml)
+    converted_response = state.load_text("<net/>", "city.NET.XML")
+
+    assert conversion_call["net_file"].name == "city.NET.XML"
+    assert conversion_call["xodr_file"].name == "city.xodr"
+    assert converted_response["filename"] == "city.xodr"
+    assert converted_response["source_filename"] == "city.NET.XML"
+    assert converted_response["source_format"] == "sumo_net_xml"
+    assert converted_response["lane_geojson"]["features"]
+
+    with pytest.raises(ValueError, match=r"\.xodr and SUMO \.net\.xml"):
+        state.load_text("<network/>", "unsupported.xml")
+
+
+def test_web_save_uses_native_file_type_picker() -> None:
+    """Save format selection belongs in the native Save As dialog."""
+    repo_root = Path(__file__).resolve().parents[1]
+    web_root = repo_root / "pyxodr3d" / "web"
+    index_html = (web_root / "index.html").read_text(encoding="utf-8")
+    index_javascript = (web_root / "index.js").read_text(encoding="utf-8")
+
+    assert 'id="save_format_select"' not in index_html
+    assert 'id="save_network_controls"' not in index_html
+    assert "Save as OpenDRIVE .xodr or SUMO .net.xml" in index_html
+    assert "window.showSaveFilePicker" in index_javascript
+    assert 'suggestedName: "edited_network.xodr"' in index_javascript
+    assert 'description: "OpenDRIVE File (*.xodr)"' in index_javascript
+    assert 'accept: { "application/xml": [".xodr"] }' in index_javascript
+    assert 'description: "SUMO Network File (*.net.xml)"' in index_javascript
+    assert 'accept: { "application/xml": [".net.xml"] }' in index_javascript
+    assert "excludeAcceptAllOption: true" in index_javascript
+    assert "fileHandle.createWritable()" in index_javascript
+    assert 'savePayload.save_format = saveFormat;' in index_javascript
+    assert "payload.download_text || payload.xodr" in index_javascript
+    save_function = index_javascript.split(
+        "async function saveEditedXodr()",
+        maxsplit=1,
+    )[1].split("window.OpenDriveViewer =", maxsplit=1)[0]
+    assert save_function.index("await writeTextFile(") < save_function.index(
+        "await loadPayload(payload)"
+    )
+
+
+def test_web_save_can_convert_download_to_sumo_net_xml(
+    synthetic_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SUMO save converts the refreshed OpenDRIVE file and returns its XML."""
+    from pyxodr3d.web import _editor
+
+    state = _editor._ViewerState(synthetic_file)
+    payload = state.as_response()
+    conversion_call: dict[str, Path] = {}
+
+    def fake_xodr_to_net_xml(
+        xodr_file: str | Path,
+        net_file: str | Path | None = None,
+    ) -> object:
+        xodr_path = Path(xodr_file)
+        net_path = Path(net_file or "")
+        conversion_call["xodr_file"] = xodr_path
+        conversion_call["net_file"] = net_path
+        assert ET.parse(xodr_path).getroot().tag == "OpenDRIVE"
+        net_path.write_text('<net version="1.20"/>', encoding="utf-8")
+        return object()
+
+    monkeypatch.setattr(_editor, "xodr_to_net_xml", fake_xodr_to_net_xml)
+    saved = state.save_geojson(
+        payload["geojson"],
+        payload["lane_geojson"],
+        payload["signal_geojson"],
+        output_format="sumo_net_xml",
+    )
+
+    assert conversion_call["xodr_file"].name == "edited_network.xodr"
+    assert conversion_call["net_file"].name == "edited_network.net.xml"
+    assert saved["saved_filename"] == "edited_network.net.xml"
+    assert saved["saved_format"] == "sumo_net_xml"
+    assert saved["download_text"] == '<net version="1.20"/>'
+    assert saved["filename"] == "edited_network.xodr"
+    assert state.current_file is not None
+    assert state.current_file.name == "edited_network.xodr"
+
+    with pytest.raises(ValueError, match="Save format must be"):
+        state.save_geojson(payload["geojson"], output_format="xml")
+
+
+def test_web_saved_xodr_reloads_with_content() -> None:
+    """A web-exported OpenDRIVE file must be non-empty and loadable."""
+    from pyxodr3d.web import _editor
+
+    repo_root = Path(__file__).resolve().parents[1]
+    state = _editor._ViewerState(repo_root / "datasets/data.xodr")
+    payload = state.as_response()
+    saved = state.save_geojson(
+        payload["geojson"],
+        payload["lane_geojson"],
+        payload["signal_geojson"],
+        output_format="xodr",
+    )
+
+    assert saved["download_text"].lstrip().startswith("<?xml")
+    reloaded = _editor._ViewerState().load_text(
+        saved["download_text"],
+        saved["saved_filename"],
+    )
+
+    assert reloaded["filename"] == "edited_network.xodr"
+    assert reloaded["geojson"]["features"]
+    assert reloaded["lane_geojson"]["features"]
+
+
+def test_web_saved_sumo_net_xml_reloads_with_projection(tmp_path: Path) -> None:
+    """A web-exported SUMO network must convert back to browser-ready data."""
+    from pyxodr3d.web import _editor
+
+    repo_root = Path(__file__).resolve().parents[1]
+    source_xodr = repo_root / "datasets/chatt.xodr"
+    source_payload = _editor._ViewerState(source_xodr).as_response()
+    net_file = tmp_path / "edited_network.net.xml"
+    odr.xodr_to_net_xml(source_xodr, net_file=net_file)
+
+    net_root = ET.parse(net_file).getroot()
+    location = net_root.find("location")
+    assert location is not None
+    assert location.get("netOffset")
+    valid_projection = location.get("projParameter")
+    assert valid_projection not in {None, "", "!"}
+
+    payload = _editor._ViewerState().load_text(
+        net_file.read_text(encoding="utf-8"),
+        net_file.name,
+    )
+
+    assert payload["filename"] == "edited_network.xodr"
+    assert payload["source_projection_valid"] is True
+    assert payload["sumo_conversion_mode"] == "embedded_opendrive"
+    assert payload["file_size_bytes"] == source_xodr.stat().st_size
+    assert payload["proj4"]
+    assert len(payload["geojson"]["features"]) == len(
+        source_payload["geojson"]["features"]
+    )
+    assert len(payload["lane_geojson"]["features"]) == len(
+        source_payload["lane_geojson"]["features"]
+    )
+    assert payload["geojson"]["bbox"] == pytest.approx(
+        source_payload["geojson"]["bbox"],
+        abs=1e-5,
+    )
+
+    net_text = net_file.read_text(encoding="utf-8")
+    net_file.write_text(
+        net_text.replace(
+            f'projParameter="{valid_projection}"',
+            'projParameter="!"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    legacy_payload = _editor._ViewerState().load_text(
+        net_file.read_text(encoding="utf-8"),
+        net_file.name,
+    )
+
+    assert not legacy_payload["proj4"]
+    assert legacy_payload["source_projection_valid"] is False
+    assert legacy_payload["sumo_conversion_mode"] == "netconvert"
+    assert legacy_payload["identifiers_preserved"] is False
+    assert legacy_payload["geojson"]["features"]
+    assert legacy_payload["lane_geojson"]["features"]
+    legacy_bbox = legacy_payload["geojson"]["bbox"]
+    assert legacy_bbox is not None
+    assert all(-1.0 < coordinate < 1.0 for coordinate in legacy_bbox)
+
+
+def test_web_saved_sumo_preserves_data_with_incomplete_projection() -> None:
+    """The real save/reload flow preserves topology and rejects an invalid CRS."""
+    from pyxodr3d.web import _editor
+
+    repo_root = Path(__file__).resolve().parents[1]
+    source_xodr = repo_root / "datasets/data.xodr"
+    source_state = _editor._ViewerState(source_xodr)
+    source_payload = source_state.as_response()
+    saved = source_state.save_geojson(
+        source_payload["geojson"],
+        source_payload["lane_geojson"],
+        source_payload["signal_geojson"],
+        output_format="sumo_net_xml",
+    )
+
+    location = ET.fromstring(saved["download_text"]).find("location")
+    assert location is not None
+    assert location.get("projParameter") == "!"
+
+    reloaded_state = _editor._ViewerState()
+    payload = reloaded_state.load_text(
+        saved["download_text"],
+        saved["saved_filename"],
+    )
+
+    assert len(source_payload["geojson"]["features"]) == 234
+    assert len(source_payload["lane_geojson"]["features"]) == 1028
+    assert len(source_payload["signal_geojson"]["features"]) == 0
+    assert payload["source_projection_valid"] is False
+    assert payload["sumo_conversion_mode"] == "embedded_opendrive"
+    assert payload["identifiers_preserved"] is True
+    assert payload["proj4"] == saved["proj4"]
+    assert len(payload["geojson"]["features"]) == len(
+        saved["geojson"]["features"]
+    )
+    assert len(payload["lane_geojson"]["features"]) == len(
+        saved["lane_geojson"]["features"]
+    )
+    assert reloaded_state.current_file is not None
+    source_identifiers = _opendrive_identifier_inventory(
+        ET.parse(source_xodr).getroot()
+    )
+    assert _opendrive_identifier_inventory(
+        ET.fromstring(saved["xodr"])
+    ) == source_identifiers
+    assert _opendrive_identifier_inventory(
+        ET.parse(reloaded_state.current_file).getroot()
+    ) == source_identifiers
+
+
 def test_lane_queries_roadmarks_and_surface_points(
     synthetic_map: odr.OpenDriveMap,
 ) -> None:
@@ -1617,6 +1932,48 @@ def test_chatt_xodr_converts_to_sumo_net_and_back(tmp_path: Path) -> None:
     assert edge_280.getLanes()[1].getParam("pyxodr3d.original_lane_id") == "-2"
     assert sumo_net.getNode("1").getParam("pyxodr3d.original_node_id") == "1"
 
+    source_root = ET.parse(xodr).getroot()
+    source_road_ids = {road.get("id") for road in source_root.findall("road")}
+    source_junction_ids = {
+        junction.get("id") for junction in source_root.findall("junction")
+    }
+    source_lane_ids_by_road = {
+        road.get("id"): {
+            lane.get("id")
+            for lane in road.findall("./lanes/laneSection/*/lane")
+        }
+        for road in source_root.findall("road")
+    }
+    net_root = ET.parse(net_file).getroot()
+
+    def net_param(element: ET.Element, key: str) -> str | None:
+        return next(
+            (
+                param.get("value")
+                for param in element.findall("param")
+                if param.get("key") == key
+            ),
+            None,
+        )
+
+    normal_edges = [
+        edge
+        for edge in net_root.findall("edge")
+        if edge.get("function") != "internal"
+    ]
+    for edge in normal_edges:
+        original_road_id = net_param(edge, "pyxodr3d.original_link_id")
+        assert original_road_id in source_road_ids
+        for lane in edge.findall("lane"):
+            assert net_param(lane, "pyxodr3d.original_lane_id") in (
+                source_lane_ids_by_road[original_road_id]
+            )
+    annotated_junction_ids = {
+        net_param(junction, "pyxodr3d.original_node_id")
+        for junction in net_root.findall("junction")
+    }
+    assert source_junction_ids <= annotated_junction_ids
+
     roundtrip_map = odr.xodr_from_net_xml(
         net=sumo_net,
         xodr_file=roundtrip_xodr,
@@ -1624,6 +1981,12 @@ def test_chatt_xodr_converts_to_sumo_net_and_back(tmp_path: Path) -> None:
 
     assert isinstance(roundtrip_map, odr.OpenDriveMap)
     assert roundtrip_xodr.exists()
+    assert roundtrip_xodr.read_bytes() == xodr.read_bytes()
+    assert roundtrip_map.sumo_conversion_mode == "embedded_opendrive"
+    assert roundtrip_map.identifiers_preserved is True
+    assert _opendrive_identifier_inventory(
+        ET.parse(roundtrip_xodr).getroot()
+    ) == _opendrive_identifier_inventory(source_root)
     assert len(roundtrip_map.getRoads()) > 0
     assert len(roundtrip_map.getJunctions()) > 0
     assert roundtrip_map.getRoad("280").id == "280"
