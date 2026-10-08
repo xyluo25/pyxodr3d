@@ -5,7 +5,6 @@ from copy import deepcopy
 import json
 import math
 from pathlib import Path
-import shutil
 import subprocess
 import threading
 import urllib.request
@@ -239,7 +238,6 @@ def test_open_drive_map_global_query_helpers(synthetic_map: odr.OpenDriveMap) ->
     assert len(synthetic_map.getLanes()) == 5
 
 
-@pytest.mark.skip(reason="Skipping test for now")
 def test_open_drive_map_lon_lat_conversion_without_header_offset(
     tmp_path: Path,
 ) -> None:
@@ -613,7 +611,6 @@ def test_open_drive_map_save_xodr_preserves_loaded_xml(
     assert len(reloaded.getJunctions()) == len(synthetic_map.getJunctions())
 
 
-@pytest.mark.skip(reason="Skipping test for now")
 def test_web_save_persists_dragged_lane_geometry(synthetic_file: Path) -> None:
     from pyxodr3d.web._editor import _ViewerState
 
@@ -663,7 +660,6 @@ def test_web_package_exports_default_xodr() -> None:
     assert DEFAULT_XODR.exists()
 
 
-@pytest.mark.skip(reason="Skipping test for now")
 def test_web_static_javascript_uses_module_mime_type() -> None:
     """Browsers reject module scripts unless JavaScript has a JS MIME type."""
     from pyxodr3d.web import run_server
@@ -709,10 +705,10 @@ def test_web_uses_ornl_logo_as_favicon() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     web_root = repo_root / "pyxodr3d" / "web"
     index_html = (web_root / "index.html").read_text(encoding="utf-8")
-    logo_bytes = (web_root / "ornl_logo.jpg").read_bytes()
+    logo_bytes = (web_root / "ornl_logo.png").read_bytes()
 
-    assert '<link rel="icon" type="image/jpeg" href="./ornl_logo.jpg" />' in index_html
-    assert logo_bytes.startswith(b"\xff\xd8\xff")
+    assert '<link rel="icon" type="image/png" href="./ornl_logo.png" />' in index_html
+    assert logo_bytes.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_web_uses_keyless_openfreemap_light_basemap() -> None:
@@ -757,6 +753,22 @@ def test_web_spotlight_panel_can_dock_on_either_side() -> None:
     resize_dots_rule = index_css.partition("#spotlight_splitter::after {")[2].partition(
         "}"
     )[0]
+    attribute_row_rule = index_css.partition(".attribute-row {")[2].partition("}")[0]
+    attribute_input_rule = index_css.partition(
+        ".attribute-row input,\n.attribute-row textarea {"
+    )[2].partition("}")[0]
+    spotlight_content_rule = index_css.partition("#spotlight_content {")[2].partition(
+        "}"
+    )[0]
+    attribute_editor_rule = index_css.partition("#attribute_editor {")[2].partition(
+        "}"
+    )[0]
+    attribute_fields_rule = index_css.partition("#attribute_fields {")[2].partition(
+        "}"
+    )[0]
+    attribute_fields_data_rule = index_css.partition(
+        "#attribute_fields:not(:empty) {"
+    )[2].partition("}")[0]
 
     assert '<main id="main_view">' in index_html
     assert '<body data-spotlight-side="right">' in index_html
@@ -780,7 +792,7 @@ def test_web_spotlight_panel_can_dock_on_either_side() -> None:
     assert "padding: 0;" in map_rule
     assert "#map .maplibregl-canvas-container" in index_css
     assert "#map .maplibregl-canvas {" in index_css
-    assert 'href="./index.css?v=20261007_middle_splitter"' in index_html
+    assert 'href="./index.css?v=20261007_basemap_notice_autohide"' in index_html
     assert "position: relative;" in spotlight_rule
     assert "flex: 0 0 auto;" in spotlight_rule
     assert "height: 100%;" in spotlight_rule
@@ -788,8 +800,7 @@ def test_web_spotlight_panel_can_dock_on_either_side() -> None:
     assert "--panel-gap" not in index_css
     assert "gap: 0;" in index_css
     assert "order: 1;" in splitter_rule
-    assert "flex: 0 0 16px;" in splitter_rule
-    assert "width: 16px;" in splitter_rule
+    assert "width: 8px;" in splitter_rule
     assert "height: 100%;" in splitter_rule
     assert 'body[data-spotlight-side="left"] #main_view' in index_css
     assert "top: 50%;" in resize_dots_rule
@@ -801,6 +812,20 @@ def test_web_spotlight_panel_can_dock_on_either_side() -> None:
         in resize_dots_rule
     )
     assert "#attribute_fields:not(:empty)" in index_css
+    assert "minmax(62px, 0.42fr) minmax(0, 1fr)" in attribute_row_rule
+    assert "min-width: 0;" in attribute_row_rule
+    assert "box-sizing: border-box;" in attribute_input_rule
+    assert "max-width: 100%;" in attribute_input_rule
+    assert "overflow: hidden;" in spotlight_content_rule
+    assert "overflow: hidden;" in attribute_editor_rule
+    assert "min-height: 0;" in attribute_fields_rule
+    assert "#attribute_fields:empty" in index_css
+    assert "display: none;" in index_css.partition("#attribute_fields:empty {")[2].partition("}")[0]
+    assert "flex: 1 1 0;" in attribute_fields_data_rule
+    assert "height: 0;" in attribute_fields_data_rule
+    assert "box-sizing: border-box;" in attribute_fields_data_rule
+    assert "overflow-y: auto;" in attribute_fields_data_rule
+    assert "align-content: start;" in attribute_fields_data_rule
     assert '#spotlight[data-side="left"]' in index_css
     assert '#spotlight[data-side="right"]' in index_css
     assert (
@@ -825,6 +850,147 @@ def test_web_spotlight_panel_can_dock_on_either_side() -> None:
     assert 'localStorage.removeItem("opendriveviewer_top")' in index_javascript
 
 
+def test_web_sidebar_has_project_links_and_section_navigation() -> None:
+    """The sidebar exposes project links, useful sections, and collapsed icons."""
+    repo_root = Path(__file__).resolve().parents[1]
+    index_html = (repo_root / "pyxodr3d" / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    index_css = (repo_root / "pyxodr3d" / "web" / "index.css").read_text(
+        encoding="utf-8"
+    )
+    index_javascript = (repo_root / "pyxodr3d" / "web" / "index.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="spotlight_project_links"' in index_html
+    assert 'href="./" title="pyxodr3d home"' in index_html
+    assert 'href="https://github.com/ORNL-Real-Sim/pyxodr3d"' in index_html
+    assert 'href="https://github.com/ORNL-Real-Sim/pyxodr3d/issues"' in index_html
+    assert '<span>pyxodr3d</span>' in index_html
+    assert '<span>GitHub</span>' in index_html
+    assert '<span>Issue Tracker</span>' in index_html
+    assert 'id="spotlight_section_nav" role="tablist"' in index_html
+    assert 'data-spotlight-section="editor"' in index_html
+    assert 'data-spotlight-section="routing"' in index_html
+    assert 'data-spotlight-section="view"' in index_html
+    assert 'class="fa fa-pencil-square-o"' in index_html
+    assert 'class="fa fa-random"' in index_html
+    assert 'class="fa fa-eye"' in index_html
+    assert '>Selected Data<' not in index_html
+    assert 'id="attribute_editor_title" class="spotlight-section-title">Editor<' in index_html
+    assert '#spotlight.collapsed #spotlight_section_nav' in index_css
+    assert '#spotlight.collapsed .spotlight-section-label' in index_css
+    assert 'function setSpotlightSection(sectionName)' in index_javascript
+    assert 'panel.hidden = panel.dataset.spotlightPanel !== sectionName;' in index_javascript
+    assert 'setSpotlightCollapsed(false);' in index_javascript
+    assert 'button.addEventListener("keydown", navigateSpotlightSections);' in index_javascript
+
+
+def test_web_sidebar_includes_routing_and_view_options() -> None:
+    """The sidebar provides Python-backed routing and layer visibility choices."""
+    repo_root = Path(__file__).resolve().parents[1]
+    web_root = repo_root / "pyxodr3d" / "web"
+    index_html = (web_root / "index.html").read_text(encoding="utf-8")
+    index_javascript = (web_root / "index.js").read_text(encoding="utf-8")
+
+    for element_id in [
+        "route_select_start_btn",
+        "route_select_end_btn",
+        "route_calculate_btn",
+        "route_clear_btn",
+        "route_start_lane",
+        "route_end_lane",
+        "route_summary",
+    ]:
+        assert f'id="{element_id}"' in index_html
+
+    view_options = {
+        "view_road_objects": "roadObjects",
+        "view_road_signals": "roadSignals",
+        "view_road_shoulder": "roadShoulder",
+        "view_road_sidewalk": "roadSidewalk",
+        "view_reference_line": "referenceLine",
+        "view_reference_line_arrows": "referenceLineArrows",
+        "view_roadmarks": "roadmarks",
+        "view_grid": "grid",
+        "view_wireframe": "wireframe",
+        "view_roads": "roads",
+    }
+    for element_id, option_name in view_options.items():
+        assert f'id="{element_id}"' in index_html
+        assert f'data-view-option="{option_name}"' in index_html
+
+    assert 'requestJson("/api/route"' in index_javascript
+    assert "start_lane_key: routeStartLaneKey" in index_javascript
+    assert "end_lane_key: routeEndLaneKey" in index_javascript
+    assert 'addEditorGeoJsonSource("opendrive-route"' in index_javascript
+    assert 'setRouteEndpoint(routeSelectionTarget, lane);' in index_javascript
+    assert "parse_options" not in index_javascript
+    assert "Parse Options" not in index_html
+    assert 'map.setPaintProperty(' in index_javascript
+    assert 'map.setFilter(layerId, featureFilter);' in index_javascript
+    assert "function applyLaneViewOptions()" in index_javascript
+    assert 'viewOptions.roadShoulder' in index_javascript
+    assert 'viewOptions.roadSidewalk' in index_javascript
+    assert '["opendrive-lanes", "opendrive-lane-borders"]' in index_javascript
+    assert 'hiddenLaneTypes.push("shoulder")' in index_javascript
+    assert 'hiddenLaneTypes.push("sidewalk")' in index_javascript
+    assert (
+        "Unselectable fields indicate that the source file contains no related data."
+        in " ".join(index_html.split())
+    )
+    assert "function viewOptionAvailability()" in index_javascript
+    assert "function updateViewOptionAvailability()" in index_javascript
+    assert 'roadObjects: signalFeatureTypes.has("signal_object")' in index_javascript
+    assert 'roadShoulder: laneTypes.has("shoulder")' in index_javascript
+    assert 'roadSidewalk: laneTypes.has("sidewalk")' in index_javascript
+    assert "input.disabled = !available;" in index_javascript
+    assert 'row.classList.toggle("unavailable", !available);' in index_javascript
+    assert ".spotlight-option-row.unavailable" in (
+        web_root / "index.css"
+    ).read_text(encoding="utf-8")
+    assert '["opendrive-road-casing", "opendrive-roads"]' in index_javascript
+    assert '["gridmesh-lines-minor", "gridmesh-lines-major"]' in index_javascript
+
+
+def test_web_routing_uses_python_lane_graph(
+    synthetic_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The web route response follows the directed Python lane graph."""
+    from pyxodr3d.web._editor import _ViewerState
+
+    monkeypatch.setattr(
+        odr.OpenDriveMap,
+        "convertXY2LonLat",
+        lambda self, x, y: (float(x) / 111_320.0, float(y) / 110_540.0),
+    )
+    monkeypatch.setattr(
+        odr.OpenDriveMap,
+        "convertLonLat2XY",
+        lambda self, lon, lat: (float(lon) * 111_320.0, float(lat) * 110_540.0),
+    )
+    state = _ViewerState(synthetic_file)
+    start = "1/0.000000/-1"
+    end = "2/0.000000/-1"
+
+    route = state.route_between_lanes(start, end)
+
+    assert route["lane_keys"] == [start, end]
+    assert route["lane_count"] == 2
+    assert route["length_m"] > 0
+    assert [
+        feature["properties"]["route_role"]
+        for feature in route["route_geojson"]["features"]
+    ] == ["start", "end"]
+
+    with pytest.raises(ValueError, match="Unknown start lane key"):
+        state.route_between_lanes("missing", end)
+    with pytest.raises(ValueError, match="No directed lane route exists"):
+        state.route_between_lanes(end, start)
+
+
 def test_web_basemap_fallback_requires_invalid_projection() -> None:
     """Invalid map coordinates use Grid Mesh without reacting to tile errors."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -839,13 +1005,16 @@ def test_web_basemap_fallback_requires_invalid_projection() -> None:
     )
     normalized_html = " ".join(index_html.split())
 
-    assert 'id="basemap_fallback_notice" role="alert"' in index_html
+    assert 'id="basemap_fallback_notice" role="status" aria-live="polite"' in (
+        index_html
+    )
     assert (
         "source file does not include usable projection information"
         in normalized_html
     )
     assert "could not be rendered on a real-world map" in normalized_html
     assert "#basemap_fallback_notice[hidden]" in index_css
+    assert "#basemap_fallback_notice.is-visible" in index_css
     assert "payloadSupportsRealWorldBasemap === false" in index_javascript
     assert 'const nextBasemapId = unsupportedRealWorldBasemap ? "gridmesh"' in (
         index_javascript
@@ -858,6 +1027,10 @@ def test_web_basemap_fallback_requires_invalid_projection() -> None:
     assert 'map.on("error", handleBasemapRenderError)' not in index_javascript
     assert "isActiveBasemapRenderError" not in index_javascript
     assert "basemapFallbackNoticeClose.addEventListener" in index_javascript
+    assert "const BASEMAP_FALLBACK_NOTICE_DURATION_MS = 7000;" in index_javascript
+    assert 'basemapFallbackNotice.classList.add("is-visible")' in index_javascript
+    assert 'basemapFallbackNotice.classList.remove("is-visible")' in index_javascript
+    assert "BASEMAP_FALLBACK_NOTICE_FADE_MS" in index_javascript
 
 
 def test_web_lane_arrows_use_connected_representative_movements() -> None:
@@ -879,6 +1052,286 @@ def test_web_lane_arrows_use_connected_representative_movements() -> None:
     assert "represented_lane_count: group.length" in index_javascript
 
 
+def test_web_lane_width_uses_exact_server_mesh() -> None:
+    """Width changes must request an exact mesh and preserve non-driving widths."""
+    repo_root = Path(__file__).resolve().parents[1]
+    index_javascript = (repo_root / "pyxodr3d" / "web" / "index.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'requestJson("/api/preview-lane-geometry"' in index_javascript
+    assert "function scheduleLaneGeometryPreview(" in index_javascript
+    assert "function laneGeometryPreviewPayload()" in index_javascript
+    assert "lane_geojson: laneGeometryPreviewPayload()" in index_javascript
+    assert "const LANE_GEOMETRY_PREVIEW_DEBOUNCE_MS = 120;" in index_javascript
+    assert 'laneType === "driving"' in index_javascript
+    assert "lane.width_scale" in index_javascript
+    assert "rebuildAllLaneSectionGeometry" not in index_javascript
+    assert "stitchConnectedLaneEndpoints" not in index_javascript
+
+
+def test_web_lane_geometry_preview_is_exact_and_nonmutating(
+    synthetic_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Width previews must use parser geometry without changing loaded state."""
+    from pyxodr3d.web._editor import _ViewerState
+
+    monkeypatch.setattr(
+        odr.OpenDriveMap,
+        "convertXY2LonLat",
+        lambda self, x, y: (float(x) / 111_320.0, float(y) / 110_540.0),
+    )
+    state = _ViewerState(synthetic_file)
+    original = state.as_response()["lane_geojson"]
+    edited = deepcopy(original)
+    width_scale = 1.25
+    for feature in edited["features"]:
+        if feature["properties"]["lane_type"] == "driving":
+            feature["width_scale"] = width_scale
+
+    cached_preview_map_id = id(state._lane_preview_map)
+    preview_response = state.preview_lane_geojson(edited)
+    preview = preview_response["lane_geojson"]
+    preview_widths = [
+        feature["properties"]["width"]
+        for feature in preview["features"]
+        if feature["properties"]["lane_type"] == "driving"
+    ]
+    loaded_widths = [
+        feature["properties"]["width"]
+        for feature in state.as_response()["lane_geojson"]["features"]
+        if feature["properties"]["lane_type"] == "driving"
+    ]
+    original_widths = [
+        feature["properties"]["width"]
+        for feature in original["features"]
+        if feature["properties"]["lane_type"] == "driving"
+    ]
+
+    assert preview_widths
+    assert preview_response["preview_mode"] == "memory"
+    assert id(state._lane_preview_map) == cached_preview_map_id
+    preview_property_names = {
+        "feature_type",
+        "lane_key",
+        "lane_id",
+        "lane_type",
+        "junction",
+        "width",
+    }
+    assert all(
+        set(feature["properties"]) <= preview_property_names
+        for feature in preview["features"]
+    )
+    assert preview_widths == pytest.approx(
+        [width * width_scale for width in original_widths],
+        rel=1e-4,
+    )
+    assert loaded_widths == original_widths
+
+    restored = state.preview_lane_geojson(original)["lane_geojson"]
+    restored_widths = [
+        feature["properties"]["width"]
+        for feature in restored["features"]
+        if feature["properties"]["lane_type"] == "driving"
+    ]
+    assert restored_widths == pytest.approx(original_widths, rel=1e-4)
+
+
+def test_lane_geometry_smoothly_repairs_linked_junction_gap() -> None:
+    """A linked junction endpoint must close its gap without moving its far end."""
+    from pyxodr3d.web._editor import (
+        _lane_endpoint,
+        _lon_lat_distance_m,
+        _repair_lane_connection_geometry,
+    )
+
+    def lane_feature(
+        lane_key: str,
+        centers: list[tuple[float, float]],
+        *,
+        junction: str,
+        successor_keys: list[str],
+    ) -> dict[str, object]:
+        half_width = 0.00001
+        outer = [[lon, lat + half_width] for lon, lat in centers]
+        inner = [[lon, lat - half_width] for lon, lat in centers]
+        ring = [*outer, *reversed(inner), outer[0]]
+        return {
+            "type": "Feature",
+            "properties": {
+                "feature_type": "lane",
+                "lane_key": lane_key,
+                "lane_id": -1,
+                "lane_type": "driving",
+                "junction": junction,
+                "successor_keys": successor_keys,
+            },
+            "geometry": {"type": "Polygon", "coordinates": [ring]},
+        }
+
+    approach = lane_feature(
+        "approach",
+        [(0.0, 0.0), (0.00010, 0.0)],
+        junction="-1",
+        successor_keys=["connector"],
+    )
+    connector = lane_feature(
+        "connector",
+        [
+            (0.00016, 0.0),
+            (0.00020, 0.00005),
+            (0.00022, 0.00014),
+            (0.00020, 0.00024),
+        ],
+        junction="10",
+        successor_keys=[],
+    )
+    connector_far_before = _lane_endpoint(connector, "end")["center"]
+    lane_geojson = {
+        "type": "FeatureCollection",
+        "features": [approach, connector],
+    }
+
+    repaired_count = _repair_lane_connection_geometry(lane_geojson)
+    approach_exit = _lane_endpoint(approach, "end")["center"]
+    connector_entry = _lane_endpoint(connector, "start")["center"]
+    connector_far_after = _lane_endpoint(connector, "end")["center"]
+
+    assert repaired_count == 1
+    assert _lon_lat_distance_m(approach_exit, connector_entry) < 1e-6
+    assert _lon_lat_distance_m(
+        connector_far_before,
+        connector_far_after,
+    ) < 1e-6
+
+
+def test_lane_boundary_parser_preserves_natural_taper_closure() -> None:
+    """A zero-width taper point is data, not an extra polygon closure point."""
+    from pyxodr3d.web._editor import _lane_polygon_boundaries
+
+    tapered_lane = {
+        "type": "Feature",
+        "properties": {"feature_type": "lane"},
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+                [
+                    [0.0, 0.0],
+                    [1.0, 1.0],
+                    [2.0, 1.0],
+                    [2.0, -1.0],
+                    [1.0, -1.0],
+                    [0.0, 0.0],
+                ]
+            ],
+        },
+    }
+
+    boundaries = _lane_polygon_boundaries(tapered_lane)
+
+    assert boundaries is not None
+    outer, inner = boundaries
+    assert len(outer) == 3
+    assert len(inner) == 3
+    assert outer[0] == inner[0] == [0.0, 0.0]
+
+
+def test_lane_width_scaling_preserves_piecewise_polynomials() -> None:
+    """Width scaling must retain taper coefficients and all width records."""
+    from pyxodr3d.web._editor import _scale_lane_width
+
+    lane_node = ET.fromstring(
+        """
+        <lane id="-1" type="driving">
+          <width sOffset="0" a="3.5" b="-0.1" c="0.02" d="0"/>
+          <width sOffset="12" a="2.0" b="0.25" c="0" d="-0.01"/>
+        </lane>
+        """
+    )
+
+    assert _scale_lane_width(lane_node, 0.5) is True
+    widths = lane_node.findall("width")
+
+    assert len(widths) == 2
+    assert [float(node.get("sOffset", "0")) for node in widths] == [0.0, 12.0]
+    assert [
+        float(widths[0].get(name, "0")) for name in ("a", "b", "c", "d")
+    ] == pytest.approx([1.75, -0.05, 0.01, 0.0])
+    assert [
+        float(widths[1].get(name, "0")) for name in ("a", "b", "c", "d")
+    ] == pytest.approx(
+        [1.0, 0.125, 0.0, -0.005]
+    )
+
+
+def test_unedited_lane_width_payload_preserves_source_polynomials() -> None:
+    """Exported display widths must not flatten untouched source profiles."""
+    from pyxodr3d.web._editor import _apply_lane_geojson_edits
+
+    root = ET.fromstring(
+        """
+        <OpenDRIVE>
+          <road id="1" length="20" junction="-1">
+            <lanes>
+              <laneSection s="0">
+                <right>
+                  <lane id="-1" type="shoulder">
+                    <width sOffset="0" a="1" b="0.1" c="0" d="0"/>
+                    <width sOffset="10" a="2" b="-0.1" c="0" d="0"/>
+                  </lane>
+                </right>
+              </laneSection>
+            </lanes>
+          </road>
+        </OpenDRIVE>
+        """
+    )
+    stub_map = type("StubMap", (), {"root": root})()
+    lane_geojson = {
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "feature_type": "lane",
+                    "road_id": "1",
+                    "lanesection_s0": 0.0,
+                    "lane_id": -1,
+                    "lane_type": "shoulder",
+                    "level": False,
+                    "width": 9.0,
+                },
+                "geometry": {"type": "Polygon", "coordinates": []},
+            }
+        ]
+    }
+
+    _apply_lane_geojson_edits(stub_map, lane_geojson)
+    widths = root.findall("./road/lanes/laneSection/right/lane/width")
+
+    assert len(widths) == 2
+    assert [
+        tuple(float(node.get(name, "0")) for name in ("a", "b", "c", "d"))
+        for node in widths
+    ] == [(1.0, 0.1, 0.0, 0.0), (2.0, -0.1, 0.0, 0.0)]
+
+
+def test_web_lane_keys_disambiguate_rounded_section_collisions() -> None:
+    """Sub-micrometer lane sections must keep distinct web topology keys."""
+    from pyxodr3d.web._editor import _web_lane_key_names
+
+    first = odr.xodr.LaneKey("687", 9.227933795217893, 1)
+    second = odr.xodr.LaneKey("687", 9.227933929029831, 1)
+    ordinary = odr.xodr.LaneKey("12", 0.0, -1)
+
+    names = _web_lane_key_names([first, second, ordinary])
+
+    assert first.to_string() == second.to_string()
+    assert names[first] != names[second]
+    assert names[ordinary] == ordinary.to_string()
+
+
 def test_lane_geojson_exports_traffic_side(
     synthetic_map: odr.OpenDriveMap, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -898,7 +1351,6 @@ def test_lane_geojson_exports_traffic_side(
     assert traffic_side_by_road["2"] is True
 
 
-@pytest.mark.skip(reason="Skipping test for now")
 def test_xodr_web_viewer_background_thread_serves_network() -> None:
     """Background mode must still serve the startup network API."""
     from pyxodr3d.web import xodr_web_viewer
@@ -967,6 +1419,36 @@ def test_objects_signals_mesh_and_routing(synthetic_map: odr.OpenDriveMap) -> No
     lane_mesh = road.get_lane_mesh(lane, eps=2.0)
     assert len(lane_mesh.vertices) >= 4
     assert len(lane_mesh.indices) >= 6
+    inner_lane = road.get_lanesection(1.0).get_lane(0)
+    sample_positions = set(
+        road.ref_line.approximate_linear(
+            2.0,
+            lane.lanesection_s0,
+            road.get_lanesection_end(lane.lanesection_s0),
+        )
+    )
+    sample_positions.update(
+        lane.outer_border.approximate_linear(
+            2.0,
+            lane.lanesection_s0,
+            road.get_lanesection_end(lane.lanesection_s0),
+        )
+    )
+    sample_positions.update(
+        inner_lane.outer_border.approximate_linear(
+            2.0,
+            lane.lanesection_s0,
+            road.get_lanesection_end(lane.lanesection_s0),
+        )
+    )
+    expected_vertices = []
+    for s in sorted(sample_positions):
+        outer_t = lane.outer_border.get(s)
+        inner_t = math.nextafter(inner_lane.outer_border.get(s), outer_t)
+        expected_vertices.extend(
+            [road.get_surface_pt(s, outer_t), road.get_surface_pt(s, inner_t)]
+        )
+    assert lane_mesh.vertices == pytest.approx(expected_vertices)
 
     roadmark_mesh = road.get_roadmark_mesh(
         lane,
@@ -1096,7 +1578,6 @@ def test_real_chatt_file_smoke() -> None:
     assert len(graph.edges) == 474
 
 
-@pytest.mark.skip(reason="Skipping test for now")
 def test_tutorial_runs_outside_repository_root(tmp_path: Path) -> None:
     """The tutorial must resolve its bundled dataset independently of cwd."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -1113,10 +1594,6 @@ def test_tutorial_runs_outside_repository_root(tmp_path: Path) -> None:
     assert "roads=189" in completed.stdout
 
 
-@pytest.mark.skipif(
-    shutil.which("netconvert") is None,
-    reason="SUMO netconvert is required for SUMO conversion tests",
-)
 def test_chatt_xodr_converts_to_sumo_net_and_back(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     xodr = repo_root / "datasets/chatt.xodr"
@@ -1203,12 +1680,8 @@ def test_xodr_to_net_xml_annotation_restores_positive_numeric_edge_ids(
     assert connections[1].get("to") == "280"
 
 
-@pytest.mark.skipif(
-    shutil.which("netconvert") is None,
-    reason="SUMO netconvert is required for SUMO conversion tests",
-)
 def test_chatt_sumo_net_xml_converts_to_opendrive_map(tmp_path: Path) -> None:
-    sumolib_net = pytest.importorskip("sumolib.net")
+    from sumolib import net as sumolib_net
     repo_root = Path(__file__).resolve().parents[1]
     net_file = repo_root / "datasets/chatt.net.xml"
     roundtrip_xodr = tmp_path / "chatt_from_sumo.xodr"

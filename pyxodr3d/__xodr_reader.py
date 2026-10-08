@@ -976,7 +976,8 @@ class Road:
         )
         return self.get_lanesection_end(s0) - s0
 
-    def get_xyz(self, s: float, t: float, h: float) -> Vec3D:
+    def _get_xyz_frame(self, s: float) -> Tuple[Vec3D, Vec3D, Vec3D]:
+        """Return the reference point and transverse/height axes at ``s``."""
         s_vec = self.ref_line.get_grad(s)
         theta = self.superelevation.get(s)
         e_s = _normalize(s_vec)
@@ -989,17 +990,33 @@ class Road:
         )
         e_h = _normalize(_cross(s_vec, e_t))
         p0 = self.ref_line.get_xyz(s)
+        return p0, e_t, e_h
+
+    @staticmethod
+    def _get_xyz_from_frame(
+        frame: Tuple[Vec3D, Vec3D, Vec3D],
+        t: float,
+        h: float,
+    ) -> Vec3D:
+        """Apply transverse and height offsets to a cached road frame."""
+        p0, e_t, e_h = frame
         return (
             p0[0] + e_t[0] * t + e_h[0] * h,
             p0[1] + e_t[1] * t + e_h[1] * h,
             p0[2] + e_t[2] * t + e_h[2] * h,
         )
 
-    def get_surface_pt(self, s: float, t: float) -> Vec3D:
-        s = min(max(s, 0.0), self.length)
-        ls = self.s_to_lanesection[self.get_lanesection_s0(s)]
-        lane = ls.get_lane(s, t)
-        inner = ls.get_lane(_next_towards_zero(lane.id))
+    def get_xyz(self, s: float, t: float, h: float) -> Vec3D:
+        return self._get_xyz_from_frame(self._get_xyz_frame(s), t, h)
+
+    def _get_surface_height(
+        self,
+        s: float,
+        t: float,
+        lane: Lane,
+        inner: Lane,
+    ) -> float:
+        """Calculate the lane surface height when its lane lookup is known."""
         t_inner = inner.outer_border.get(s)
         if lane.level:
             h_t = -math.tan(self.crossfall.get_crossfall(s,
@@ -1015,6 +1032,14 @@ class Road:
             t_outer = lane.outer_border.get(s)
             p = (t - t_inner) / (t_outer - t_inner) if t_outer != t_inner else 0.0
             h_t += p * (ho.outer - ho.inner) + ho.inner
+        return h_t
+
+    def get_surface_pt(self, s: float, t: float) -> Vec3D:
+        s = min(max(s, 0.0), self.length)
+        ls = self.s_to_lanesection[self.get_lanesection_s0(s)]
+        lane = ls.get_lane(s, t)
+        inner = ls.get_lane(_next_towards_zero(lane.id))
+        h_t = self._get_surface_height(s, t, lane, inner)
         return self.get_xyz(s, t, h_t)
 
     def get_lane_border_line(
@@ -1045,8 +1070,15 @@ class Road:
         for s in sorted(vals):
             t_outer = lane.outer_border.get(s)
             t_inner = math.nextafter(inner.outer_border.get(s), t_outer)
-            mesh.vertices.append(self.get_surface_pt(s, t_outer))
-            mesh.vertices.append(self.get_surface_pt(s, t_inner))
+            frame = self._get_xyz_frame(s)
+            outer_height = self._get_surface_height(s, t_outer, lane, inner)
+            inner_height = self._get_surface_height(s, t_inner, lane, inner)
+            mesh.vertices.append(
+                self._get_xyz_from_frame(frame, t_outer, outer_height)
+            )
+            mesh.vertices.append(
+                self._get_xyz_from_frame(frame, t_inner, inner_height)
+            )
             mesh.st_coordinates.append((s, t_outer))
             mesh.st_coordinates.append((s, t_inner))
         ccw = lane.id < 0

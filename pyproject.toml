@@ -41,6 +41,7 @@ classifiers = [
 dependencies = [
     "loguru",
     "matplotlib",
+    "pyproj",
     "sumolib",
 ]
 

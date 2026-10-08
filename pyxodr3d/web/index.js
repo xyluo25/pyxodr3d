@@ -21,6 +21,8 @@ const spotlightToggle = document.getElementById("spotlight_toggle");
 const spotlightDockLeft = document.getElementById("spotlight_dock_left");
 const spotlightDockRight = document.getElementById("spotlight_dock_right");
 const spotlightSplitter = document.getElementById("spotlight_splitter");
+const spotlightSectionButtons = [...document.querySelectorAll("[data-spotlight-section]")];
+const spotlightSectionPanels = [...document.querySelectorAll("[data-spotlight-panel]")];
 const attributeFields = document.getElementById("attribute_fields");
 const addLaneButton = document.getElementById("add_lane_btn");
 const deleteFeatureButton = document.getElementById("delete_feature_btn");
@@ -29,10 +31,26 @@ const addSignalButton = document.getElementById("add_signal_btn");
 const addPostButton = document.getElementById("add_post_btn");
 const addMastArmButton = document.getElementById("add_mastarm_btn");
 const undoMoveButton = document.getElementById("undo_move_btn");
+const routeSelectStartButton = document.getElementById("route_select_start_btn");
+const routeSelectEndButton = document.getElementById("route_select_end_btn");
+const routeCalculateButton = document.getElementById("route_calculate_btn");
+const routeClearButton = document.getElementById("route_clear_btn");
+const routeStartLaneOutput = document.getElementById("route_start_lane");
+const routeEndLaneOutput = document.getElementById("route_end_lane");
+const routeSummary = document.getElementById("route_summary");
+const viewOptionInputs = [...document.querySelectorAll("[data-view-option]")];
 const globalLaneWidthInput = document.getElementById("global_lane_width");
 const laneArrowSizeInput = document.getElementById("lane_arrow_size");
-const toggleLaneArrowsButton = document.getElementById("toggle_lane_arrows_btn");
+const viewReferenceLineArrowsInput = document.getElementById("view_reference_line_arrows");
 const SPOTLIGHT_SIDE_STORAGE_KEY = "opendriveviewer_side";
+const viewOptions = Object.fromEntries(
+  viewOptionInputs.map((input) => [input.dataset.viewOption, input.checked]),
+);
+const DEFAULT_LANE_FILL_OPACITY = [
+  "case",
+  ["boolean", ["get", "level"], false], 0.46,
+  0.34,
+];
 
 // The browser keeps three editable data sets:
 // roads for OpenDRIVE planView centerlines, lanes for lane-level polygons,
@@ -51,7 +69,7 @@ let pendingSignalDetailKind = null;
 let dragState = null;
 let undoStack = [];
 let currentLaneWidth = 3.5;
-let laneArrowsVisible = true;
+let laneArrowsVisible = viewOptions.referenceLineArrows;
 let laneArrowSize = 1;
 let generatedFeatureCounter = 0;
 const objectDefinitions = odrObjectDefinitions;
@@ -59,9 +77,16 @@ const processedEditorFeatureKeys = new Set();
 let geoEditorLiveDrawActive = false;
 let geoEditorSyncPending = false;
 let geoEditorSyncToken = 0;
+let laneGeometryPreviewTimer = null;
+let laneGeometryPreviewRequestId = 0;
+const LANE_GEOMETRY_PREVIEW_DEBOUNCE_MS = 120;
 let pendingPayloadAfterStyle = null;
 let pendingPayloadLoadResolver = null;
 const MAPLIBRE_SAFE_SOURCE_MAXZOOM = 24;
+const BASEMAP_FALLBACK_NOTICE_DURATION_MS = 7000;
+const BASEMAP_FALLBACK_NOTICE_FADE_MS = 220;
+let basemapFallbackNoticeTimer = null;
+let basemapFallbackNoticeHideTimer = null;
 let currentGeoJson = {
   type: "FeatureCollection",
   features: [],
@@ -77,6 +102,15 @@ let currentSignalGeoJson = {
 let pendingStyleRestore = null;
 let restoreRequestId = 0;
 let loadingOverlayCount = 0;
+let routeStartLaneKey = "";
+let routeEndLaneKey = "";
+let routeSelectionTarget = null;
+let routeResultSummary = "";
+let routeRequestPending = false;
+let currentRouteGeoJson = {
+  type: "FeatureCollection",
+  features: [],
+};
 
 // Basemaps are only the background.  OpenDRIVE layers are restored after
 // every style change so loaded lanes/signals do not disappear.
@@ -227,11 +261,27 @@ map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
 map.once("style.load", () => scheduleGridMeshRefresh());
 
 function showBasemapFallbackNotice() {
+  clearTimeout(basemapFallbackNoticeTimer);
+  clearTimeout(basemapFallbackNoticeHideTimer);
   basemapFallbackNotice.hidden = false;
+  requestAnimationFrame(() => {
+    basemapFallbackNotice.classList.add("is-visible");
+  });
+  basemapFallbackNoticeTimer = setTimeout(
+    hideBasemapFallbackNotice,
+    BASEMAP_FALLBACK_NOTICE_DURATION_MS,
+  );
 }
 
 function hideBasemapFallbackNotice() {
-  basemapFallbackNotice.hidden = true;
+  clearTimeout(basemapFallbackNoticeTimer);
+  clearTimeout(basemapFallbackNoticeHideTimer);
+  basemapFallbackNoticeTimer = null;
+  basemapFallbackNotice.classList.remove("is-visible");
+  basemapFallbackNoticeHideTimer = setTimeout(() => {
+    basemapFallbackNotice.hidden = true;
+    basemapFallbackNoticeHideTimer = null;
+  }, BASEMAP_FALLBACK_NOTICE_FADE_MS);
 }
 
 function requiresRealWorldProjection(basemapId) {
@@ -723,6 +773,9 @@ function ensureGridMeshLayers() {
       type: "line",
       source: "gridmesh-lines",
       filter: ["==", ["get", "grid_type"], "minor"],
+      layout: {
+        visibility: viewOptions.grid ? "visible" : "none",
+      },
       paint: {
         "line-color": "#1b2330",
         "line-width": 1,
@@ -736,6 +789,9 @@ function ensureGridMeshLayers() {
       type: "line",
       source: "gridmesh-lines",
       filter: ["==", ["get", "grid_type"], "major"],
+      layout: {
+        visibility: viewOptions.grid ? "visible" : "none",
+      },
       paint: {
         "line-color": "#344054",
         "line-width": 1.35,
@@ -928,6 +984,48 @@ function setSpotlightSide(side, persist = true) {
   scheduleSpotlightMapResize();
 }
 
+function setSpotlightCollapsed(collapsed) {
+  spotlight.classList.toggle("collapsed", collapsed);
+  spotlightSplitter.hidden = collapsed;
+  spotlightToggle.textContent = collapsed ? "+" : "-";
+  spotlightToggle.title = collapsed ? "Unfold panel" : "Fold panel";
+  spotlightToggle.setAttribute("aria-label", spotlightToggle.title);
+  scheduleSpotlightMapResize();
+}
+
+function setSpotlightSection(sectionName) {
+  const selectedButton = spotlightSectionButtons.find(
+    (button) => button.dataset.spotlightSection === sectionName,
+  );
+  if (!selectedButton) return;
+
+  spotlightSectionButtons.forEach((button) => {
+    button.setAttribute("aria-selected", String(button === selectedButton));
+  });
+  spotlightSectionPanels.forEach((panel) => {
+    panel.hidden = panel.dataset.spotlightPanel !== sectionName;
+  });
+  if (spotlight.classList.contains("collapsed")) {
+    setSpotlightCollapsed(false);
+  }
+}
+
+function navigateSpotlightSections(event) {
+  const direction = {
+    ArrowLeft: -1,
+    ArrowUp: -1,
+    ArrowRight: 1,
+    ArrowDown: 1,
+  }[event.key];
+  if (!direction) return;
+  event.preventDefault();
+  const currentIndex = spotlightSectionButtons.indexOf(event.currentTarget);
+  const nextIndex = (currentIndex + direction + spotlightSectionButtons.length) % spotlightSectionButtons.length;
+  const nextButton = spotlightSectionButtons[nextIndex];
+  nextButton.focus();
+  setSpotlightSection(nextButton.dataset.spotlightSection);
+}
+
 function restoreSpotlightLayout() {
   const storedWidth = Number(localStorage.getItem("opendriveviewer_width"));
   if (Number.isFinite(storedWidth) && storedWidth > 0) {
@@ -949,6 +1047,83 @@ function setStatus(message, isError = false) {
   status.style.color = isError ? "#8a1f11" : "#1f2933";
   if (!isError && loadingOverlayCount > 0) setLoadingOverlayMessage(message);
   updateBasemapPosition();
+}
+
+function routeLaneLabel(laneKey) {
+  const feature = findLaneFeatureByKey(laneKey);
+  if (!feature) return laneKey || "Not selected";
+  const properties = feature.properties || {};
+  const sectionStart = Number(properties.lanesection_s0 || 0).toFixed(1);
+  return `Road ${properties.road_id} · Lane ${properties.lane_id} · s ${sectionStart} m`;
+}
+
+function updateRoutingControls() {
+  routeStartLaneOutput.textContent = routeLaneLabel(routeStartLaneKey);
+  routeEndLaneOutput.textContent = routeLaneLabel(routeEndLaneKey);
+  routeSelectStartButton.setAttribute("aria-pressed", String(routeSelectionTarget === "start"));
+  routeSelectEndButton.setAttribute("aria-pressed", String(routeSelectionTarget === "end"));
+  routeSelectStartButton.disabled = routeRequestPending;
+  routeSelectEndButton.disabled = routeRequestPending;
+  routeCalculateButton.disabled = routeRequestPending || !(routeStartLaneKey && routeEndLaneKey);
+  routeClearButton.disabled = routeRequestPending || !(
+    routeStartLaneKey ||
+    routeEndLaneKey ||
+    currentRouteGeoJson.features.length > 0
+  );
+
+  if (routeSelectionTarget === "start") {
+    routeSummary.textContent = "Click a lane on the map to set the route start.";
+  } else if (routeSelectionTarget === "end") {
+    routeSummary.textContent = "Click a lane on the map to set the destination.";
+  } else if (routeResultSummary) {
+    routeSummary.textContent = routeResultSummary;
+  } else if (routeStartLaneKey && routeEndLaneKey) {
+    routeSummary.textContent = "Start and destination selected. Calculate the route.";
+  } else if (routeStartLaneKey) {
+    routeSummary.textContent = "Choose Destination lane, then click the map.";
+  } else {
+    routeSummary.textContent = "Choose Start lane to begin.";
+  }
+}
+
+function setRouteSelectionTarget(target) {
+  routeSelectionTarget = routeSelectionTarget === target ? null : target;
+  if (routeSelectionTarget) setSpotlightSection("routing");
+  if (map.loaded()) {
+    map.getCanvas().style.cursor = routeSelectionTarget ? "crosshair" : "";
+  }
+  updateRoutingControls();
+}
+
+function setRouteEndpoint(target, lane) {
+  const laneKey = laneKeyFromProperties(lane?.properties);
+  if (!laneKey) return;
+  if (target === "start") {
+    routeStartLaneKey = laneKey;
+  } else {
+    routeEndLaneKey = laneKey;
+  }
+  routeResultSummary = "";
+  setRouteSource(emptyFeatureCollection());
+  routeSelectionTarget = target === "start" && !routeEndLaneKey ? "end" : null;
+  map.getCanvas().style.cursor = routeSelectionTarget ? "crosshair" : "";
+  updateRoutingControls();
+  setStatus(
+    routeSelectionTarget === "end"
+      ? `Start lane ${laneKey} selected. Click the destination lane.`
+      : `${target === "start" ? "Start" : "Destination"} lane ${laneKey} selected.`,
+  );
+}
+
+function clearRoute() {
+  routeStartLaneKey = "";
+  routeEndLaneKey = "";
+  routeSelectionTarget = null;
+  routeResultSummary = "";
+  routeRequestPending = false;
+  setRouteSource(emptyFeatureCollection());
+  if (map.loaded()) map.getCanvas().style.cursor = "";
+  updateRoutingControls();
 }
 
 function updateBasemapPosition() {
@@ -1400,17 +1575,37 @@ function metersPerDegree(lat) {
 function estimateLaneWidth(feature) {
   const stored = Number(feature?.properties?.width);
   if (Number.isFinite(stored) && stored > 0) return stored;
-  const ring = feature?.geometry?.coordinates?.[0] || [];
-  const points = ring.length > 1 ? ring.slice(0, -1) : ring;
-  if (points.length < 4) return null;
-  const half = Math.floor(points.length / 2);
-  const outer = points.slice(0, half);
-  const inner = points.slice(half).reverse();
+  const boundaries = laneBoundaryCoordinates(feature);
+  if (!boundaries) return null;
+  const { outer, inner } = boundaries;
   const widths = outer
     .map((point, index) => metersBetween(point, inner[index]))
     .filter((width) => Number.isFinite(width) && width > 0.1)
     .sort((a, b) => a - b);
   return widths.length ? widths[Math.floor(widths.length / 2)] : null;
+}
+
+function laneBoundaryCoordinates(feature) {
+  const ring = feature?.geometry?.type === "Polygon"
+    ? feature.geometry.coordinates?.[0] || []
+    : [];
+  const hasExplicitClosure = (
+    ring.length > 1 &&
+    ring.length % 2 === 1 &&
+    ring[0][0] === ring[ring.length - 1][0] &&
+    ring[0][1] === ring[ring.length - 1][1]
+  );
+  const points = hasExplicitClosure ? ring.slice(0, -1) : ring;
+  if (points.length < 4) return null;
+  const half = Math.floor(points.length / 2);
+  const outer = points.slice(0, half);
+  const inner = points.slice(half).reverse();
+  const pairCount = Math.min(outer.length, inner.length);
+  if (pairCount < 2) return null;
+  return {
+    outer: outer.slice(0, pairCount).map((point) => [...point]),
+    inner: inner.slice(0, pairCount).map((point) => [...point]),
+  };
 }
 
 function updateGlobalLaneWidthFromNetwork() {
@@ -1431,22 +1626,18 @@ function updateGlobalLaneWidthFromNetwork() {
 
 function laneCenterline(feature) {
   if (feature?.geometry?.type === "LineString") return feature.geometry.coordinates || [];
-  const ring = feature?.geometry?.coordinates?.[0] || [];
-  const points = ring.length > 1 ? ring.slice(0, -1) : ring;
-  if (points.length < 4) return [];
-  const half = Math.floor(points.length / 2);
-  const outer = points.slice(0, half);
-  const inner = points.slice(half).reverse();
+  const boundaries = laneBoundaryCoordinates(feature);
+  if (!boundaries) return [];
+  const { outer, inner } = boundaries;
   return outer.map((point, index) => {
     const other = inner[index] || point;
     return [(Number(point[0]) + Number(other[0])) * 0.5, (Number(point[1]) + Number(other[1])) * 0.5];
   });
 }
 
-function lineToLanePolygon(lineCoordinates, widthMeters = currentLaneWidth) {
+function offsetLineCoordinates(lineCoordinates, offsetMeters) {
   const coordinates = (lineCoordinates || []).filter((coord) => Array.isArray(coord) && coord.length >= 2);
-  if (coordinates.length < 2) return null;
-  const halfWidth = Math.max(0.1, Number(widthMeters) * 0.5 || 1.75);
+  if (coordinates.length < 2) return [];
   const anchorLat = coordinates.reduce((sum, coord) => sum + Number(coord[1] || 0), 0) / coordinates.length;
   const scale = metersPerDegree(anchorLat);
   const origin = coordinates[0];
@@ -1462,18 +1653,30 @@ function lineToLanePolygon(lineCoordinates, widthMeters = currentLaneWidth) {
     const length = Math.hypot(dx, dy) || 1;
     return [-dy / length, dx / length];
   });
-  const toLonLat = (point, normal, sign) => [
-    Number(origin[0]) + (point[0] + normal[0] * halfWidth * sign) / scale.lon,
-    Number(origin[1]) + (point[1] + normal[1] * halfWidth * sign) / scale.lat,
-  ];
-  const left = xy.map((point, index) => toLonLat(point, normals[index], 1));
-  const right = xy.map((point, index) => toLonLat(point, normals[index], -1));
-  const ring = [...left, ...right.reverse()];
+  const offset = Number(offsetMeters) || 0;
+  return xy.map((point, index) => [
+    Number(origin[0]) + (point[0] + normals[index][0] * offset) / scale.lon,
+    Number(origin[1]) + (point[1] + normals[index][1] * offset) / scale.lat,
+  ]);
+}
+
+function lanePolygonFromBoundaries(outerBoundary, innerBoundary) {
+  if (outerBoundary.length < 2 || innerBoundary.length < 2) return null;
+  const outer = outerBoundary.map((point) => [...point]);
+  const inner = innerBoundary.map((point) => [...point]).reverse();
+  const ring = [...outer, ...inner];
   ring.push(ring[0]);
   return {
     type: "Polygon",
     coordinates: [ring],
   };
+}
+
+function lineToLanePolygon(lineCoordinates, widthMeters = currentLaneWidth) {
+  const halfWidth = Math.max(0.1, Number(widthMeters) * 0.5 || 1.75);
+  const left = offsetLineCoordinates(lineCoordinates, halfWidth);
+  const right = offsetLineCoordinates(lineCoordinates, -halfWidth);
+  return lanePolygonFromBoundaries(left, right);
 }
 
 function rebuildLaneGeometry(feature, widthMeters = currentLaneWidth) {
@@ -1482,28 +1685,149 @@ function rebuildLaneGeometry(feature, widthMeters = currentLaneWidth) {
   if (geometry) feature.geometry = geometry;
 }
 
-function applyGlobalLaneWidth() {
+function mergeLaneGeometryPreview(previewGeoJson) {
+  const selectedRef = selectedFeatureKey();
+  const currentFeaturesByKey = new Map(
+    currentLaneGeoJson.features.map((feature) => [
+      laneKeyFromProperties(feature.properties),
+      feature,
+    ]),
+  );
+  const previewFeatures = (previewGeoJson?.features || []).map((previewFeature) => {
+    const laneKey = laneKeyFromProperties(previewFeature.properties);
+    const currentFeature = currentFeaturesByKey.get(laneKey);
+    if (!currentFeature) return previewFeature;
+    return {
+      ...previewFeature,
+      geometry_edited: currentFeature.geometry_edited,
+      geometry_edit_kind: currentFeature.geometry_edit_kind,
+      width_scale: currentFeature.width_scale,
+      properties: {
+        ...(previewFeature.properties || {}),
+        ...(currentFeature.properties || {}),
+        width: previewFeature.properties?.width,
+      },
+    };
+  });
+
+  setLaneSource({
+    type: "FeatureCollection",
+    features: previewFeatures,
+  });
+  setSpotlightFeature(findFeatureByUndoKey(selectedRef));
+}
+
+function laneGeometryPreviewPayload() {
+  return {
+    type: "FeatureCollection",
+    features: currentLaneGeoJson.features.map((feature) => {
+      const previewFeature = {
+        type: "Feature",
+        id: feature.id,
+        properties: cloneData(feature.properties || {}),
+      };
+      for (const field of [
+        "width_scale",
+        "width_edited",
+        "geometry_edited",
+        "geometry_edit_kind",
+      ]) {
+        if (field in feature) previewFeature[field] = feature[field];
+      }
+      if (feature.geometry_edited || feature.properties?.geometry_edited) {
+        previewFeature.geometry = cloneData(feature.geometry);
+      }
+      return previewFeature;
+    }),
+  };
+}
+
+async function requestLaneGeometryPreview(requestId, successMessage) {
+  setStatus("Recalculating lane geometry with the OpenDRIVE mesh...");
+  try {
+    const payload = await requestJson("/api/preview-lane-geometry", {
+      method: "POST",
+      body: JSON.stringify({ lane_geojson: laneGeometryPreviewPayload() }),
+    });
+    if (requestId !== laneGeometryPreviewRequestId) return;
+    mergeLaneGeometryPreview(payload.lane_geojson || emptyFeatureCollection());
+    setStatus(successMessage);
+  } catch (error) {
+    if (requestId !== laneGeometryPreviewRequestId) return;
+    setStatus(`Could not recalculate lane geometry: ${errorMessage(error)}`, true);
+  }
+}
+
+function scheduleLaneGeometryPreview(successMessage, immediate = false) {
+  laneGeometryPreviewRequestId += 1;
+  const requestId = laneGeometryPreviewRequestId;
+  if (laneGeometryPreviewTimer !== null) {
+    clearTimeout(laneGeometryPreviewTimer);
+    laneGeometryPreviewTimer = null;
+  }
+  const runPreview = () => {
+    laneGeometryPreviewTimer = null;
+    requestLaneGeometryPreview(requestId, successMessage);
+  };
+  if (immediate) {
+    runPreview();
+  } else {
+    laneGeometryPreviewTimer = setTimeout(
+      runPreview,
+      LANE_GEOMETRY_PREVIEW_DEBOUNCE_MS,
+    );
+  }
+}
+
+function applyGlobalLaneWidth(immediate = false) {
   const width = Number(globalLaneWidthInput.value);
   if (!Number.isFinite(width) || width <= 0) {
     setStatus("Enter a positive lane width in meters.", true);
     return;
   }
+  const widthScale = width / Math.max(0.2, currentLaneWidth);
+  const drivingLanes = currentLaneGeoJson.features.filter((lane) => {
+    const laneType = String(lane.properties?.lane_type || "").toLowerCase();
+    const isDrivingLane = laneType === "driving";
+    return lane.properties?.feature_type === "lane" && isDrivingLane;
+  });
+  const updatedLaneCount = drivingLanes.length;
+  if (updatedLaneCount === 0) {
+    setStatus("This source file has no driving lanes to resize.", true);
+    return;
+  }
+  const successMessage = `Scaled ${updatedLaneCount} driving lanes to a typical width of ${width.toFixed(2)} m. Junction tapers and non-driving lane widths were preserved. Save to write lane width records.`;
+  if (Math.abs(widthScale - 1) <= 1e-9) {
+    if (immediate && laneGeometryPreviewTimer !== null) {
+      scheduleLaneGeometryPreview(successMessage, true);
+    }
+    return;
+  }
+
   currentLaneWidth = width;
-  for (const lane of currentLaneGeoJson.features) {
-    if (lane.properties?.feature_type !== "lane") continue;
-    lane.properties.width = width;
-    rebuildLaneGeometry(lane, width);
+  for (const lane of drivingLanes) {
+    const laneWidth = Math.max(0.01, Number(lane.properties.width) || width);
+    lane.properties.width = laneWidth * widthScale;
+    const existingScale = Number(lane.width_scale);
+    lane.width_scale = (Number.isFinite(existingScale) && existingScale > 0
+      ? existingScale
+      : 1) * widthScale;
   }
-  refreshFeatureSources();
-  if (selectedFeature?.properties?.feature_type === "lane") {
-    renderAttributeEditor(selectedFeature);
-  }
-  setStatus(`Updated all lane widths to ${width.toFixed(2)} m. Save to write lane width records.`);
+  scheduleLaneGeometryPreview(
+    successMessage,
+    immediate,
+  );
 }
 
 function laneEndpoints(feature) {
   const ring = feature?.geometry?.coordinates?.[0] || [];
-  const points = ring.length > 1 ? ring.slice(0, -1) : ring;
+  const hasExplicitClosure = (
+    ring.length > 1 &&
+    ring.length % 2 === 1 &&
+    ring[0][0] === ring[ring.length - 1][0] &&
+    ring[0][1] === ring[ring.length - 1][1]
+  );
+  const points = hasExplicitClosure ? ring.slice(0, -1) : ring;
   if (points.length < 4) return null;
   const half = Math.floor(points.length / 2);
   const midpoint = (a, b) => [(Number(a[0]) + Number(b[0])) * 0.5, (Number(a[1]) + Number(b[1])) * 0.5];
@@ -1671,9 +1995,23 @@ function applyAttributeEdit(feature, key, nextValue, oldProps) {
   } else if (feature.properties.feature_type === "lane") {
     refreshLaneIdentity(feature, oldProps);
     if (key === "width") {
-      currentLaneWidth = Math.max(0.2, Number(nextValue) || currentLaneWidth);
-      globalLaneWidthInput.value = currentLaneWidth.toFixed(2);
-      rebuildLaneGeometry(feature, currentLaneWidth);
+      const previousWidth = Number(oldProps.width);
+      const editedWidth = Number(nextValue);
+      if (!Number.isFinite(editedWidth) || editedWidth <= 0) {
+        feature.properties.width = oldProps.width;
+        setStatus("Enter a positive lane width in meters.", true);
+        return;
+      }
+      if (Number.isFinite(previousWidth) && previousWidth > 0) {
+        const existingScale = Number(feature.width_scale);
+        feature.width_scale = (Number.isFinite(existingScale) && existingScale > 0
+          ? existingScale
+          : 1) * editedWidth / previousWidth;
+      }
+      scheduleLaneGeometryPreview(
+        `Recalculated lane ${feature.properties.lane_id} with its OpenDRIVE width profile preserved. Save to write the lane width records.`,
+        true,
+      );
     }
   } else if (["signal", "signal_object", "environment_object"].includes(feature.properties.feature_type)) {
     if (feature.properties.feature_type === "environment_object" && ["environment_type", "type", "name"].includes(key)) {
@@ -1834,12 +2172,14 @@ function addLaneFromSelection() {
     properties: props,
     geometry: shiftedPolygon(base),
   };
-  rebuildLaneGeometry(feature, currentLaneWidth);
   currentLaneGeoJson.features.push(feature);
   autoConnectDraggedLane(feature, Math.max(2.5, currentLaneWidth));
   setSpotlightFeature(feature);
   refreshFeatureSources();
-  setStatus(`Added lane ${props.lane_id} on road ${props.road_id}. Save to write it to OpenDRIVE.`);
+  scheduleLaneGeometryPreview(
+    `Added lane ${props.lane_id} on road ${props.road_id}. Save to write it to OpenDRIVE.`,
+    true,
+  );
 }
 
 function removeFeatureFromCollection(collection, predicate) {
@@ -1960,6 +2300,10 @@ function draggableFeatureFromEvent(event) {
 // Direct map dragging is intentionally simple: move the selected polygon,
 // keep an undo snapshot, and let save project the final lon/lat to s/t.
 function startFeatureDrag(event) {
+  if (routeSelectionTarget) {
+    event.preventDefault();
+    return;
+  }
   const feature = draggableFeatureFromEvent(event);
   if (!feature) return;
   event.preventDefault();
@@ -2473,6 +2817,7 @@ function refreshFeatureSources() {
       });
     }
   }
+  applyViewOptions();
 }
 
 function renderAttributeEditor(feature) {
@@ -2621,11 +2966,11 @@ function registerSpotlightEvents() {
   map.on("mouseleave", endFeatureDrag);
   map.on("mousemove", "opendrive-lanes", (event) => {
     if (dragState) return;
-    map.getCanvas().style.cursor = "pointer";
+    map.getCanvas().style.cursor = routeSelectionTarget ? "crosshair" : "pointer";
   });
   map.on("mouseleave", "opendrive-lanes", () => {
     if (dragState) return;
-    map.getCanvas().style.cursor = "";
+    map.getCanvas().style.cursor = routeSelectionTarget ? "crosshair" : "";
   });
   map.on("mousedown", "opendrive-lanes", startFeatureDrag);
   map.on("click", "opendrive-lanes", (event) => {
@@ -2633,6 +2978,10 @@ function registerSpotlightEvents() {
     if (dragState) return;
     const lane = resolveSourceFeature(event.features?.[0]);
     if (lane?.properties?.feature_type === "lane") {
+      if (routeSelectionTarget) {
+        setRouteEndpoint(routeSelectionTarget, lane);
+        return;
+      }
       const props = lane.properties || {};
       const placement = {
         lon: event.lngLat.lng,
@@ -2694,7 +3043,7 @@ function refreshLaneDirectionSource() {
 }
 
 function updateLaneArrowControls() {
-  toggleLaneArrowsButton.textContent = laneArrowsVisible ? "Hide Lane Arrows" : "Show Lane Arrows";
+  viewReferenceLineArrowsInput.checked = laneArrowsVisible;
   if (map.getLayer("opendrive-lane-direction-arrows")) {
     map.setLayoutProperty(
       "opendrive-lane-direction-arrows",
@@ -2710,14 +3059,134 @@ function applyLaneArrowSize() {
   refreshLaneDirectionSource();
 }
 
-function toggleLaneArrows() {
-  laneArrowsVisible = !laneArrowsVisible;
+function setLayerVisibility(layerIds, visible) {
+  for (const layerId of layerIds) {
+    if (map.getLayer(layerId)) {
+      map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
+    }
+  }
+}
+
+function visibleSignalFeatureFilter() {
+  const featureTypes = [];
+  if (viewOptions.roadObjects) featureTypes.push("signal_object", "environment_object");
+  if (viewOptions.roadSignals) featureTypes.push("signal");
+  if (featureTypes.length === 0) {
+    return ["==", ["get", "feature_type"], "__hidden__"];
+  }
+  return ["in", ["get", "feature_type"], ["literal", featureTypes]];
+}
+
+function applySignalViewOptions() {
+  const featureFilter = visibleSignalFeatureFilter();
+  for (const layerId of ["opendrive-signal-hitbox", "opendrive-signals"]) {
+    if (map.getLayer(layerId)) map.setFilter(layerId, featureFilter);
+  }
+  if (map.getLayer("opendrive-signal-labels")) {
+    map.setFilter("opendrive-signal-labels", [
+      "all",
+      featureFilter,
+      ["!=", ["to-string", ["coalesce", ["get", "text"], ""]], ""],
+      ["!=", ["downcase", ["to-string", ["coalesce", ["get", "text"], ""]]], "none"],
+    ]);
+  }
+}
+
+function applyLaneViewOptions() {
+  const hiddenLaneTypes = [];
+  if (!viewOptions.roadShoulder) hiddenLaneTypes.push("shoulder");
+  if (!viewOptions.roadSidewalk) hiddenLaneTypes.push("sidewalk");
+  const normalizedLaneType = [
+    "downcase",
+    ["to-string", ["coalesce", ["get", "lane_type"], ""]],
+  ];
+  const laneFilter = hiddenLaneTypes.length
+    ? ["!", ["in", normalizedLaneType, ["literal", hiddenLaneTypes]]]
+    : null;
+  for (const layerId of ["opendrive-lanes", "opendrive-lane-borders"]) {
+    if (map.getLayer(layerId)) map.setFilter(layerId, laneFilter);
+  }
+}
+
+function viewOptionAvailability() {
+  const lanes = currentLaneGeoJson.features || [];
+  const signalsAndObjects = currentSignalGeoJson.features || [];
+  const roads = currentGeoJson.features || [];
+  const laneTypes = new Set(
+    lanes.map((feature) => String(feature.properties?.lane_type || "").trim().toLowerCase()),
+  );
+  const signalFeatureTypes = new Set(
+    signalsAndObjects.map((feature) => String(feature.properties?.feature_type || "")),
+  );
+  const hasDirectionLane = lanes.some((feature) => {
+    const laneType = String(feature.properties?.lane_type || "").trim().toLowerCase();
+    return (!laneType || laneType === "driving") && laneCenterline(feature).length >= 2;
+  });
+  const hasNetworkGeometry = roads.length > 0 || lanes.length > 0;
+  return {
+    roadObjects: signalFeatureTypes.has("signal_object") || signalFeatureTypes.has("environment_object"),
+    roadSignals: signalFeatureTypes.has("signal"),
+    roadShoulder: laneTypes.has("shoulder"),
+    roadSidewalk: laneTypes.has("sidewalk"),
+    referenceLine: roads.length > 0,
+    referenceLineArrows: hasDirectionLane,
+    roadmarks: lanes.length > 0,
+    grid: hasNetworkGeometry,
+    wireframe: lanes.length > 0,
+    roads: lanes.length > 0,
+  };
+}
+
+function updateViewOptionAvailability() {
+  const availability = viewOptionAvailability();
+  for (const input of viewOptionInputs) {
+    const available = availability[input.dataset.viewOption] ?? true;
+    input.disabled = !available;
+    const row = input.closest(".spotlight-option-row");
+    if (row) {
+      row.classList.toggle("unavailable", !available);
+      row.setAttribute("aria-disabled", String(!available));
+    }
+  }
+}
+
+function applyViewOptions() {
+  updateViewOptionAvailability();
+  viewOptionInputs.forEach((input) => {
+    viewOptions[input.dataset.viewOption] = input.checked;
+  });
+  laneArrowsVisible = viewOptions.referenceLineArrows;
+  setLayerVisibility(["opendrive-lanes"], viewOptions.roads);
+  setLayerVisibility(["opendrive-lane-borders"], viewOptions.roadmarks);
+  setLayerVisibility(
+    ["opendrive-road-casing", "opendrive-roads"],
+    viewOptions.referenceLine,
+  );
+  setLayerVisibility(
+    ["gridmesh-lines-minor", "gridmesh-lines-major"],
+    viewOptions.grid,
+  );
+  if (map.getLayer("opendrive-lanes")) {
+    map.setPaintProperty(
+      "opendrive-lanes",
+      "fill-opacity",
+      viewOptions.wireframe ? 0 : DEFAULT_LANE_FILL_OPACITY,
+    );
+  }
+  applyLaneViewOptions();
+  applySignalViewOptions();
   updateLaneArrowControls();
 }
 
 function registerLaneSelectionEvents() {
   if (laneSelectionEventsRegistered) return;
   laneSelectionEventsRegistered = true;
+}
+
+function setRouteSource(geojson) {
+  currentRouteGeoJson = geojson || emptyFeatureCollection();
+  const source = map.getSource("opendrive-route");
+  if (source) source.setData(currentRouteGeoJson);
 }
 
 // The visible network is lane-first.  Road centerlines stay available for
@@ -2728,6 +3197,7 @@ function setLaneSource(geojson) {
   if (map.getSource("opendrive-lanes")) {
     map.getSource("opendrive-lanes").setData(currentLaneGeoJson);
     refreshLaneDirectionSource();
+    applyViewOptions();
     return;
   }
 
@@ -2736,6 +3206,9 @@ function setLaneSource(geojson) {
     id: "opendrive-lanes",
     type: "fill",
     source: "opendrive-lanes",
+    layout: {
+      visibility: viewOptions.roads ? "visible" : "none",
+    },
     paint: {
       "fill-color": [
         "case",
@@ -2744,17 +3217,16 @@ function setLaneSource(geojson) {
         ["==", ["get", "lane_type"], "biking"], "#f79009",
         "#667085",
       ],
-      "fill-opacity": [
-        "case",
-        ["boolean", ["get", "level"], false], 0.46,
-        0.34,
-      ],
+      "fill-opacity": viewOptions.wireframe ? 0 : DEFAULT_LANE_FILL_OPACITY,
     },
   });
   map.addLayer({
     id: "opendrive-lane-borders",
     type: "line",
     source: "opendrive-lanes",
+    layout: {
+      visibility: viewOptions.roadmarks ? "visible" : "none",
+    },
     paint: {
       "line-color": "#111827",
       "line-width": 1.2,
@@ -2767,7 +3239,7 @@ function setLaneSource(geojson) {
     type: "fill",
     source: "opendrive-lane-directions",
     layout: {
-      visibility: laneArrowsVisible ? "visible" : "none",
+      visibility: viewOptions.referenceLineArrows ? "visible" : "none",
     },
     paint: {
       "fill-color": "#101828",
@@ -2776,6 +3248,39 @@ function setLaneSource(geojson) {
     },
   });
   updateLaneArrowControls();
+  addEditorGeoJsonSource("opendrive-route", currentRouteGeoJson);
+  map.addLayer({
+    id: "opendrive-route",
+    type: "fill",
+    source: "opendrive-route",
+    paint: {
+      "fill-color": [
+        "match",
+        ["get", "route_role"],
+        "start", "#12b76a",
+        "end", "#f04438",
+        "start_end", "#7a5af8",
+        "#fdb022",
+      ],
+      "fill-opacity": 0.72,
+    },
+  });
+  map.addLayer({
+    id: "opendrive-route-outline",
+    type: "line",
+    source: "opendrive-route",
+    paint: {
+      "line-color": [
+        "match",
+        ["get", "route_role"],
+        "start", "#027a48",
+        "end", "#b42318",
+        "start_end", "#5925dc",
+        "#b54708",
+      ],
+      "line-width": 4,
+    },
+  });
   addEditorGeoJsonSource("opendrive-lane-adjacent", emptyFeatureCollection());
   map.addLayer({
     id: "opendrive-lane-adjacent",
@@ -2825,12 +3330,14 @@ function setLaneSource(geojson) {
     },
   });
   registerLaneSelectionEvents();
+  applyViewOptions();
 }
 
 function setSignalSource(geojson) {
   currentSignalGeoJson = geojson || emptyFeatureCollection();
   if (map.getSource("opendrive-signals")) {
     map.getSource("opendrive-signals").setData(currentSignalGeoJson);
+    applySignalViewOptions();
     return;
   }
 
@@ -2894,6 +3401,7 @@ function setSignalSource(geojson) {
       "text-halo-width": 1.25,
     },
   });
+  applySignalViewOptions();
 }
 
 function setRoadSource(geojson) {
@@ -2907,7 +3415,7 @@ function setRoadSource(geojson) {
       type: "line",
       source: "opendrive-roads",
       layout: {
-        visibility: "none",
+        visibility: viewOptions.referenceLine ? "visible" : "none",
       },
       paint: {
         "line-color": "#243447",
@@ -2920,7 +3428,7 @@ function setRoadSource(geojson) {
       type: "line",
       source: "opendrive-roads",
       layout: {
-        visibility: "none",
+        visibility: viewOptions.referenceLine ? "visible" : "none",
       },
       paint: {
         "line-color": "#f2b705",
@@ -2949,6 +3457,10 @@ function setRoadSource(geojson) {
     });
     registerSpotlightEvents();
   }
+  setLayerVisibility(
+    ["opendrive-road-casing", "opendrive-roads"],
+    viewOptions.referenceLine,
+  );
 }
 
 // Loading means replacing every collection from the Python API response.
@@ -2983,6 +3495,7 @@ function installPayloadData(payload) {
     setLaneSource(payload.lane_geojson || emptyFeatureCollection());
     setSignalSource(payload.signal_geojson || emptyFeatureCollection());
     loadIntoEditor(payload.geojson || emptyFeatureCollection());
+    applyViewOptions();
     scheduleGridMeshRefresh();
     fitToGeoJson(
       (payload.lane_geojson && payload.lane_geojson.features.length > 0)
@@ -3000,7 +3513,13 @@ function installPayloadData(payload) {
 }
 
 function loadPayload(payload) {
+  laneGeometryPreviewRequestId += 1;
+  if (laneGeometryPreviewTimer !== null) {
+    clearTimeout(laneGeometryPreviewTimer);
+    laneGeometryPreviewTimer = null;
+  }
   currentFilename = payload.filename || "network.xodr";
+  clearRoute();
   restoreRequestId += 1;
   selectedFeature = null;
   undoStack = [];
@@ -3072,6 +3591,52 @@ async function loadNetwork() {
   }
 }
 
+async function reloadNetwork() {
+  const startedAt = performance.now();
+  showLoadingOverlay("Reloading OpenDRIVE network...");
+  setStatus("Reloading OpenDRIVE network...");
+  try {
+    const payload = await requestJson("/api/reload-xodr", {
+      method: "POST",
+    });
+    const installed = await loadPayload(payload);
+    if (installed) setStatus(loadSummary(payload, elapsedSeconds(startedAt), payloadFileSize(payload)));
+  } finally {
+    hideLoadingOverlay();
+  }
+}
+
+async function calculateRoute() {
+  if (!(routeStartLaneKey && routeEndLaneKey)) return;
+  routeRequestPending = true;
+  routeResultSummary = "Calculating route...";
+  updateRoutingControls();
+  setStatus("Calculating directed lane route...");
+  try {
+    const payload = await requestJson("/api/route", {
+      method: "POST",
+      body: JSON.stringify({
+        start_lane_key: routeStartLaneKey,
+        end_lane_key: routeEndLaneKey,
+      }),
+    });
+    setRouteSource(payload.route_geojson || emptyFeatureCollection());
+    const laneCount = Number(payload.lane_count) || payload.lane_keys?.length || 0;
+    const lengthM = Number(payload.length_m) || 0;
+    routeResultSummary = `${laneCount} lane${laneCount === 1 ? "" : "s"} · ${lengthM.toFixed(1)} m`;
+    routeRequestPending = false;
+    updateRoutingControls();
+    if (currentRouteGeoJson.features.length > 0) fitToGeoJson(currentRouteGeoJson);
+    setStatus(`Route calculated: ${routeResultSummary}.`);
+  } catch (error) {
+    setRouteSource(emptyFeatureCollection());
+    routeResultSummary = errorMessage(error);
+    routeRequestPending = false;
+    updateRoutingControls();
+    throw error;
+  }
+}
+
 async function openXodrFile(file) {
   if (!file) return;
   const startedAt = performance.now();
@@ -3082,7 +3647,10 @@ async function openXodrFile(file) {
     setStatus(`Loading ${file.name} into OpenDRIVE map...`);
     const payload = await requestJson("/api/load-xodr", {
       method: "POST",
-      body: JSON.stringify({ filename: file.name, xodr: text }),
+      body: JSON.stringify({
+        filename: file.name,
+        xodr: text,
+      }),
     });
     const installed = await loadPayload(payload);
     if (installed) setStatus(loadSummary(payload, elapsedSeconds(startedAt), payloadFileSize(payload, file.size)));
@@ -3129,6 +3697,7 @@ window.OpenDriveViewer = {
   loadNetwork,
   openXodrFile,
   saveEditedXodr,
+  calculateRoute,
   fit: () => fitToGeoJson(editorFeatureCollection()),
   spotlightRoad: (roadId) => {
     const feature = currentLaneGeoJson.features.find((item) => {
@@ -3338,7 +3907,7 @@ saveButton.addEventListener("click", () => {
 });
 fitButton.addEventListener("click", () => fitToGeoJson(editorFeatureCollection()));
 reloadButton.addEventListener("click", () => {
-  loadNetwork().catch((error) => setStatus(error.message, true));
+  reloadNetwork().catch((error) => setStatus(error.message, true));
 });
 addLaneButton.addEventListener("click", addLaneFromSelection);
 deleteFeatureButton.addEventListener("click", deleteSelectedFeature);
@@ -3347,23 +3916,33 @@ addSignalButton.addEventListener("click", () => armSignalDetailPlacement("signal
 addPostButton.addEventListener("click", () => armSignalDetailPlacement("post"));
 addMastArmButton.addEventListener("click", () => armSignalDetailPlacement("mastarm"));
 undoMoveButton.addEventListener("click", undoLastMovement);
-globalLaneWidthInput.addEventListener("input", applyGlobalLaneWidth);
-globalLaneWidthInput.addEventListener("change", applyGlobalLaneWidth);
+globalLaneWidthInput.addEventListener("input", () => applyGlobalLaneWidth(false));
+globalLaneWidthInput.addEventListener("change", () => applyGlobalLaneWidth(true));
 laneArrowSizeInput.addEventListener("input", applyLaneArrowSize);
 laneArrowSizeInput.addEventListener("change", applyLaneArrowSize);
-toggleLaneArrowsButton.addEventListener("click", toggleLaneArrows);
+routeSelectStartButton.addEventListener("click", () => setRouteSelectionTarget("start"));
+routeSelectEndButton.addEventListener("click", () => setRouteSelectionTarget("end"));
+routeCalculateButton.addEventListener("click", () => {
+  calculateRoute().catch((error) => setStatus(error.message, true));
+});
+routeClearButton.addEventListener("click", () => {
+  clearRoute();
+  setStatus("Route cleared.");
+});
+viewOptionInputs.forEach((input) => {
+  input.addEventListener("change", applyViewOptions);
+});
 basemapSelect.addEventListener("change", () => changeBasemap(basemapSelect.value));
 basemapFallbackNoticeClose.addEventListener("click", hideBasemapFallbackNotice);
 spotlightToggle.addEventListener("click", () => {
-  const collapsed = spotlight.classList.toggle("collapsed");
-  spotlightSplitter.hidden = collapsed;
-  spotlightToggle.textContent = collapsed ? "+" : "-";
-  spotlightToggle.title = collapsed ? "Unfold panel" : "Fold panel";
-  spotlightToggle.setAttribute("aria-label", spotlightToggle.title);
-  scheduleSpotlightMapResize();
+  setSpotlightCollapsed(!spotlight.classList.contains("collapsed"));
 });
 spotlightDockLeft.addEventListener("click", () => setSpotlightSide("left"));
 spotlightDockRight.addEventListener("click", () => setSpotlightSide("right"));
+spotlightSectionButtons.forEach((button) => {
+  button.addEventListener("click", () => setSpotlightSection(button.dataset.spotlightSection));
+  button.addEventListener("keydown", navigateSpotlightSections);
+});
 function startSpotlightResize(event) {
   const side = getSpotlightSide();
   if (!side || spotlight.classList.contains("collapsed")) return;
@@ -3407,6 +3986,14 @@ window.addEventListener("resize", () => {
   scheduleSpotlightMapResize();
 });
 window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && routeSelectionTarget) {
+    event.preventDefault();
+    routeSelectionTarget = null;
+    map.getCanvas().style.cursor = "";
+    updateRoutingControls();
+    setStatus("Route endpoint selection cancelled.");
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
     event.preventDefault();
     undoLastMovement();
@@ -3422,6 +4009,8 @@ window.addEventListener("keydown", (event) => {
 });
 restoreSpotlightLayout();
 updateBasemapPosition();
+updateRoutingControls();
+applyViewOptions();
 updateLaneArrowControls();
 renderObjectPalette();
 copyLaneLinkButton.textContent = "Copy Selected Lane Key";

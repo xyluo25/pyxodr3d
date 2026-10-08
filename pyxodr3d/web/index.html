@@ -8,13 +8,13 @@
       content="OpenDRIVE editor powered by pyxodr3d, MapLibre GL, and maplibre-gl-geo-editor."
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="icon" type="image/jpeg" href="./ornl_logo.jpg" />
+    <link rel="icon" type="image/png" href="./ornl_logo.png" />
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@geoman-io/maplibre-geoman-free@0.7.1/dist/maplibre-geoman.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl-geo-editor@0.7.3/style.css" />
     <link rel="stylesheet" href="./static/font-awesome.min.css" />
     <link rel="stylesheet" href="./static/bootstrap.min.css" />
-    <link rel="stylesheet" href="./index.css?v=20261007_middle_splitter" />
+    <link rel="stylesheet" href="./index.css?v=20261007_basemap_notice_autohide" />
   </head>
   <body data-spotlight-side="right">
     <main id="main_view">
@@ -25,7 +25,7 @@
           <span id="loading_screen_msg_txt">Loading...</span>
         </p>
       </div>
-      <div id="basemap_fallback_notice" role="alert" aria-live="assertive" hidden>
+      <div id="basemap_fallback_notice" role="status" aria-live="polite" aria-atomic="true" hidden>
         <span>
           Grid Mesh is being used because the source file does not include usable projection information
           or could not be rendered on a real-world map.
@@ -76,54 +76,245 @@
     ></div>
     <aside id="spotlight" data-side="right" aria-label="OpenDrive 3D Viewer panel">
       <div id="spotlight_header">
-        <strong id="spotlight_title">OpenDrive 3D Viewer</strong>
-        <div id="spotlight_header_controls">
-          <button
-            id="spotlight_dock_left"
-            type="button"
-            title="Show panel on left"
-            aria-label="Show panel on left"
-            aria-pressed="false"
-          >
-            <i class="fa fa-align-left" aria-hidden="true"></i>
-          </button>
-          <button
-            id="spotlight_dock_right"
-            type="button"
-            title="Show panel on right"
-            aria-label="Show panel on right"
-            aria-pressed="true"
-          >
-            <i class="fa fa-align-right" aria-hidden="true"></i>
-          </button>
-          <button id="spotlight_toggle" type="button" title="Fold panel" aria-label="Fold panel">-</button>
+        <div id="spotlight_header_row">
+          <strong id="spotlight_title">OpenDrive 3D Viewer</strong>
+          <div id="spotlight_header_controls">
+            <button
+              id="spotlight_dock_left"
+              type="button"
+              title="Show panel on left"
+              aria-label="Show panel on left"
+              aria-pressed="false"
+            >
+              <i class="fa fa-align-left" aria-hidden="true"></i>
+            </button>
+            <button
+              id="spotlight_dock_right"
+              type="button"
+              title="Show panel on right"
+              aria-label="Show panel on right"
+              aria-pressed="true"
+            >
+              <i class="fa fa-align-right" aria-hidden="true"></i>
+            </button>
+            <button id="spotlight_toggle" type="button" title="Fold panel" aria-label="Fold panel">-</button>
+          </div>
         </div>
+        <nav id="spotlight_project_links" aria-label="pyxodr3d project links">
+          <a href="./" title="pyxodr3d home">
+            <i class="fa fa-home" aria-hidden="true"></i>
+            <span>pyxodr3d</span>
+          </a>
+          <a
+            href="https://github.com/ORNL-Real-Sim/pyxodr3d"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="pyxodr3d on GitHub"
+          >
+            <i class="fa fa-github" aria-hidden="true"></i>
+            <span>GitHub</span>
+          </a>
+          <a
+            href="https://github.com/ORNL-Real-Sim/pyxodr3d/issues"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="pyxodr3d issue tracker"
+          >
+            <i class="fa fa-bug" aria-hidden="true"></i>
+            <span>Issue Tracker</span>
+          </a>
+        </nav>
       </div>
+      <nav id="spotlight_section_nav" role="tablist" aria-label="Viewer sidebar sections">
+        <button
+          id="spotlight_editor_tab"
+          class="spotlight-section-tab"
+          type="button"
+          role="tab"
+          aria-controls="spotlight_editor_panel"
+          aria-selected="true"
+          data-spotlight-section="editor"
+          title="Editor"
+        >
+          <i class="fa fa-pencil-square-o" aria-hidden="true"></i>
+          <span class="spotlight-section-label">Editor</span>
+        </button>
+        <button
+          id="spotlight_routing_tab"
+          class="spotlight-section-tab"
+          type="button"
+          role="tab"
+          aria-controls="spotlight_routing_panel"
+          aria-selected="false"
+          data-spotlight-section="routing"
+          title="Routing"
+        >
+          <i class="fa fa-random" aria-hidden="true"></i>
+          <span class="spotlight-section-label">Routing</span>
+        </button>
+        <button
+          id="spotlight_view_tab"
+          class="spotlight-section-tab"
+          type="button"
+          role="tab"
+          aria-controls="spotlight_view_panel"
+          aria-selected="false"
+          data-spotlight-section="view"
+          title="View"
+        >
+          <i class="fa fa-eye" aria-hidden="true"></i>
+          <span class="spotlight-section-label">View</span>
+        </button>
+      </nav>
       <div id="spotlight_content">
-        <div id="attribute_editor">
-          <strong id="attribute_editor_title">Selected Data</strong>
-          <div id="edit_actions">
-            <button id="add_lane_btn" type="button">Add Lane</button>
-            <button id="delete_feature_btn" type="button">Delete</button>
-            <button id="copy_lane_link_btn" type="button">Copy Lane Link</button>
-            <button id="add_signal_btn" type="button">Add Signal</button>
-            <button id="add_post_btn" type="button">Add Post</button>
-            <button id="add_mastarm_btn" type="button">Add Mast Arm</button>
-            <button id="undo_move_btn" type="button">Undo Move</button>
+        <section
+          id="spotlight_editor_panel"
+          class="spotlight-section-panel"
+          role="tabpanel"
+          aria-labelledby="spotlight_editor_tab"
+          data-spotlight-panel="editor"
+        >
+          <div id="attribute_editor" class="spotlight-section-card">
+            <strong id="attribute_editor_title" class="spotlight-section-title">Editor</strong>
+            <div id="edit_actions">
+              <button id="add_lane_btn" type="button">Add Lane</button>
+              <button id="delete_feature_btn" type="button">Delete</button>
+              <button id="copy_lane_link_btn" type="button">Copy Lane Link</button>
+              <button id="add_signal_btn" type="button">Add Signal</button>
+              <button id="add_post_btn" type="button">Add Post</button>
+              <button id="add_mastarm_btn" type="button">Add Mast Arm</button>
+              <button id="undo_move_btn" type="button">Undo Move</button>
+            </div>
+            <div id="attribute_fields"></div>
           </div>
-          <div id="global_lane_width_control">
-            <label for="global_lane_width">LANE WIDTH</label>
-            <input id="global_lane_width" type="number" min="0.2" step="0.1" max="10" value="3.5" />
+        </section>
+        <section
+          id="spotlight_routing_panel"
+          class="spotlight-section-panel"
+          role="tabpanel"
+          aria-labelledby="spotlight_routing_tab"
+          data-spotlight-panel="routing"
+          hidden
+        >
+          <div class="spotlight-section-card">
+            <strong class="spotlight-section-title">Routing</strong>
+            <p class="spotlight-section-description">
+              Select a start and destination lane on the map, then calculate a directed lane path.
+            </p>
+            <div class="route-endpoint-list" aria-label="Route endpoints">
+              <button
+                id="route_select_start_btn"
+                class="route-endpoint-select"
+                type="button"
+                data-route-endpoint="start"
+                aria-pressed="false"
+              >
+                <i class="fa fa-map-marker route-start-icon" aria-hidden="true"></i>
+                <span>
+                  <strong>Start lane</strong>
+                  <output id="route_start_lane">Not selected</output>
+                </span>
+              </button>
+              <button
+                id="route_select_end_btn"
+                class="route-endpoint-select"
+                type="button"
+                data-route-endpoint="end"
+                aria-pressed="false"
+              >
+                <i class="fa fa-map-marker route-end-icon" aria-hidden="true"></i>
+                <span>
+                  <strong>Destination lane</strong>
+                  <output id="route_end_lane">Not selected</output>
+                </span>
+              </button>
+            </div>
+            <div class="route-actions">
+              <button id="route_calculate_btn" class="spotlight-primary-action" type="button" disabled>
+                <i class="fa fa-location-arrow" aria-hidden="true"></i>
+                Calculate Route
+              </button>
+              <button id="route_clear_btn" type="button" disabled>Clear</button>
+            </div>
+            <p id="route_summary" class="route-summary" role="status" aria-live="polite">
+              Choose Start lane to begin.
+            </p>
           </div>
-          <div id="lane_arrow_size_control">
-            <label for="lane_arrow_size">ARROW SIZE</label>
-            <input id="lane_arrow_size" type="number" min="0.2" max="3" step="0.1" value="1" />
+        </section>
+        <section
+          id="spotlight_view_panel"
+          class="spotlight-section-panel"
+          role="tabpanel"
+          aria-labelledby="spotlight_view_tab"
+          data-spotlight-panel="view"
+          hidden
+        >
+          <div class="spotlight-section-card">
+            <strong class="spotlight-section-title">View</strong>
+            <p class="spotlight-section-description">
+              Adjust map visualization without changing source data. Unselectable fields indicate that the source
+              file contains no related data.
+            </p>
+            <div class="spotlight-option-list" aria-label="Map view options">
+              <label class="spotlight-option-row">
+                <input id="view_road_objects" type="checkbox" data-view-option="roadObjects" checked />
+                <span>Road Objects</span>
+              </label>
+              <label class="spotlight-option-row">
+                <input id="view_road_signals" type="checkbox" data-view-option="roadSignals" checked />
+                <span>Road Signals</span>
+              </label>
+              <label class="spotlight-option-row" title="Show OpenDRIVE lanes with type shoulder.">
+                <input id="view_road_shoulder" type="checkbox" data-view-option="roadShoulder" checked />
+                <span>Road Shoulder</span>
+              </label>
+              <label class="spotlight-option-row" title="Show OpenDRIVE lanes with type sidewalk.">
+                <input id="view_road_sidewalk" type="checkbox" data-view-option="roadSidewalk" checked />
+                <span>Road Sidewalk</span>
+              </label>
+              <label class="spotlight-option-row">
+                <input id="view_reference_line" type="checkbox" data-view-option="referenceLine" />
+                <span>Reference Line</span>
+              </label>
+              <label class="spotlight-option-row" title="Show representative lane-direction arrows.">
+                <input
+                  id="view_reference_line_arrows"
+                  type="checkbox"
+                  data-view-option="referenceLineArrows"
+                  checked
+                />
+                <span>Reference Line Arrows</span>
+              </label>
+              <label class="spotlight-option-row" title="Show lane boundary lines as roadmark guidance.">
+                <input id="view_roadmarks" type="checkbox" data-view-option="roadmarks" checked />
+                <span>Roadmarks</span>
+              </label>
+              <label class="spotlight-option-row" title="Show coordinate grid lines when using the Grid Mesh basemap.">
+                <input id="view_grid" type="checkbox" data-view-option="grid" checked />
+                <span>Grid</span>
+              </label>
+              <!-- <label class="spotlight-option-row">
+                <input id="view_wireframe" type="checkbox" data-view-option="wireframe" />
+                <span>Wireframe</span> -->
+              </label>
+              <label class="spotlight-option-row">
+                <input id="view_roads" type="checkbox" data-view-option="roads" checked />
+                <span>Roads</span>
+              </label>
+            </div>
+            <div class="spotlight-option-divider"></div>
+            <div id="global_lane_width_control">
+              <label for="global_lane_width">DRIVING LANE WIDTH</label>
+              <input id="global_lane_width" type="number" min="0.2" step="0.1" max="10" value="3.5" />
+            </div>
+            <div id="lane_arrow_size_control">
+              <label for="lane_arrow_size">ARROW SIZE</label>
+              <input id="lane_arrow_size" type="number" min="0.2" max="3" step="0.1" value="1" />
+            </div>
           </div>
-          <button id="toggle_lane_arrows_btn" type="button">Hide Lane Arrows</button>
-          <div id="attribute_fields"></div>
-        </div>
+        </section>
       </div>
     </aside>
-    <script type="module" src="./index.js?v=20260602_mime"></script>
+    <script type="module" src="./index.js?v=20261007_exact_lane_width"></script>
   </body>
 </html>

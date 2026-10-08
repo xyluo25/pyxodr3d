@@ -15,6 +15,7 @@ the web page can edit today, while leaving unknown OpenDRIVE content untouched.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import math
 from http import HTTPStatus
@@ -28,7 +29,7 @@ from urllib.parse import urlparse
 import webbrowser
 import xml.etree.ElementTree as ET
 
-from ..__xodr_reader import _float, _int, readXodr
+from ..__xodr_reader import LaneKey, _float, _int, readXodr
 
 
 # Files served by the local web app.  ``data.xodr`` keeps the same "open a map
@@ -179,17 +180,13 @@ def _lane_mesh_width(mesh: Any) -> float | None:
     return widths[len(widths) // 2] if widths else None
 
 
-def _lane_feature(
+def _lane_geometry(
     odr_map: Any,
     road: Any,
     lane: Any,
-    *,
-    section_end: float,
-    lane_successors: dict[str, list[str]],
-    lane_predecessors: dict[str, list[str]],
     eps: float = 2.0,
-) -> dict[str, Any] | None:
-    """Export one visible lane polygon, including lane-level network links."""
+) -> tuple[dict[str, Any], float | None] | None:
+    """Build one lane polygon and its representative width from parser mesh."""
     if lane.id == 0:
         return None
 
@@ -199,15 +196,33 @@ def _lane_feature(
 
     outer = [_as_lon_lat(odr_map, x, y) for x, y, _ in mesh.vertices[0::2]]
     inner = [_as_lon_lat(odr_map, x, y) for x, y, _ in mesh.vertices[1::2]]
-    lane_width = _lane_mesh_width(mesh)
     ring = [[lon, lat] for lon, lat in outer]
     ring.extend([[lon, lat] for lon, lat in reversed(inner)])
     if ring and ring[0] != ring[-1]:
         ring.append(ring[0])
     if len(ring) < 4:
         return None
+    return {"type": "Polygon", "coordinates": [ring]}, _lane_mesh_width(mesh)
 
-    lane_key = lane.key.to_string()
+
+def _lane_feature(
+    odr_map: Any,
+    road: Any,
+    lane: Any,
+    *,
+    section_end: float,
+    lane_successors: dict[str, list[str]],
+    lane_predecessors: dict[str, list[str]],
+    lane_key_names: dict[LaneKey, str],
+    eps: float = 2.0,
+) -> dict[str, Any] | None:
+    """Export one visible lane polygon, including lane-level network links."""
+    geometry_result = _lane_geometry(odr_map, road, lane, eps)
+    if geometry_result is None:
+        return None
+    geometry, lane_width = geometry_result
+
+    lane_key = lane_key_names.get(lane.key, lane.key.to_string())
     predecessor_keys = list(dict.fromkeys(lane_predecessors.get(lane_key, [])))
     successor_keys = list(dict.fromkeys(lane_successors.get(lane_key, [])))
     return {
@@ -232,23 +247,275 @@ def _lane_feature(
             "successor_keys": successor_keys,
             "source": "pyxodr3d",
         },
-        "geometry": {
-            "type": "Polygon",
-            "coordinates": [ring],
-        },
+        "geometry": geometry,
     }
 
 
-def _map_to_lane_geojson(odr_map: Any) -> dict[str, Any]:
+def _web_lane_key_names(lane_keys: list[LaneKey]) -> dict[LaneKey, str]:
+    """Return readable lane keys while disambiguating rounded section starts."""
+    base_names = {lane_key: lane_key.to_string() for lane_key in lane_keys}
+    base_name_counts: dict[str, int] = {}
+    for base_name in base_names.values():
+        base_name_counts[base_name] = base_name_counts.get(base_name, 0) + 1
+
+    return {
+        lane_key: (
+            base_name
+            if base_name_counts[base_name] == 1
+            else (
+                f"{lane_key.road_id}/"
+                f"{format(lane_key.lanesection_s0, '.17g')}/"
+                f"{lane_key.lane_id}"
+            )
+        )
+        for lane_key, base_name in base_names.items()
+    }
+
+
+def _lane_polygon_boundaries(
+    feature: dict[str, Any],
+) -> tuple[list[list[float]], list[list[float]]] | None:
+    """Return matching outer/inner lane boundaries from a polygon feature."""
+    rings = (feature.get("geometry") or {}).get("coordinates") or []
+    ring = rings[0] if rings else []
+    has_explicit_closure = (
+        len(ring) > 1
+        and len(ring) % 2 == 1
+        and ring[0] == ring[-1]
+    )
+    points = ring[:-1] if has_explicit_closure else ring
+    if len(points) < 4 or len(points) % 2:
+        return None
+    half = len(points) // 2
+    outer = [[float(point[0]), float(point[1])] for point in points[:half]]
+    inner = [
+        [float(point[0]), float(point[1])]
+        for point in reversed(points[half:])
+    ]
+    if len(outer) != len(inner):
+        return None
+    return outer, inner
+
+
+def _set_lane_polygon_boundaries(
+    feature: dict[str, Any],
+    outer: list[list[float]],
+    inner: list[list[float]],
+) -> None:
+    """Write matching boundaries back to a closed lane polygon."""
+    ring = [list(point) for point in outer]
+    ring.extend(list(point) for point in reversed(inner))
+    if ring:
+        ring.append(list(ring[0]))
+    feature["geometry"] = {"type": "Polygon", "coordinates": [ring]}
+
+
+def _lon_lat_distance_m(first: list[float], second: list[float]) -> float:
+    """Return a local metric distance for nearby longitude/latitude points."""
+    latitude = math.radians((float(first[1]) + float(second[1])) * 0.5)
+    dx = (float(first[0]) - float(second[0])) * 111_320.0 * math.cos(latitude)
+    dy = (float(first[1]) - float(second[1])) * 110_540.0
+    return math.hypot(dx, dy)
+
+
+def _lane_endpoint(
+    feature: dict[str, Any],
+    boundary_name: str,
+) -> dict[str, Any] | None:
+    """Return one polygon cross-section in road-reference order."""
+    boundaries = _lane_polygon_boundaries(feature)
+    if boundaries is None:
+        return None
+    outer, inner = boundaries
+    index = 0 if boundary_name == "start" else len(outer) - 1
+    return {
+        "name": boundary_name,
+        "center": [
+            (outer[index][0] + inner[index][0]) * 0.5,
+            (outer[index][1] + inner[index][1]) * 0.5,
+        ],
+    }
+
+
+def _lane_travel_endpoint(
+    feature: dict[str, Any],
+    travel_boundary: str,
+) -> dict[str, Any] | None:
+    """Return the entry or exit cross-section for the lane travel direction."""
+    lane_id = int(float((feature.get("properties") or {}).get("lane_id") or 0))
+    follows_reference = lane_id < 0
+    endpoint_name = (
+        "start" if follows_reference else "end"
+    ) if travel_boundary == "entry" else (
+        "end" if follows_reference else "start"
+    )
+    return _lane_endpoint(feature, endpoint_name)
+
+
+def _is_junction_lane_feature(feature: dict[str, Any]) -> bool:
+    """Return whether a lane belongs to a junction connector road."""
+    junction = str((feature.get("properties") or {}).get("junction") or "")
+    return junction.lower() not in {"", "-1", "none"}
+
+
+def _smoothly_shift_lane_endpoint(
+    feature: dict[str, Any],
+    endpoint_name: str,
+    target_center: list[float],
+) -> bool:
+    """Blend an endpoint translation along a lane instead of making a wedge."""
+    boundaries = _lane_polygon_boundaries(feature)
+    if boundaries is None:
+        return False
+    outer, inner = boundaries
+    centers = [
+        [
+            (outer[index][0] + inner[index][0]) * 0.5,
+            (outer[index][1] + inner[index][1]) * 0.5,
+        ]
+        for index in range(len(outer))
+    ]
+    endpoint_index = 0 if endpoint_name == "start" else len(centers) - 1
+    endpoint_center = centers[endpoint_index]
+    delta_lon = float(target_center[0]) - endpoint_center[0]
+    delta_lat = float(target_center[1]) - endpoint_center[1]
+    if _lon_lat_distance_m(endpoint_center, target_center) <= 1e-6:
+        return False
+
+    ordered_indices = (
+        range(len(centers))
+        if endpoint_name == "start"
+        else range(len(centers) - 1, -1, -1)
+    )
+    cumulative_distance = 0.0
+    previous_index: int | None = None
+    lane_length = sum(
+        _lon_lat_distance_m(centers[index - 1], centers[index])
+        for index in range(1, len(centers))
+    )
+    if lane_length <= 1e-9:
+        return False
+    blend_length = min(
+        lane_length,
+        min(20.0, max(8.0, lane_length * 0.75)),
+    )
+    for index in ordered_indices:
+        if previous_index is not None:
+            cumulative_distance += _lon_lat_distance_m(
+                centers[previous_index],
+                centers[index],
+            )
+        ratio = min(1.0, cumulative_distance / max(blend_length, 1e-9))
+        remaining = 1.0 - ratio
+        weight = remaining * remaining * (3.0 - 2.0 * remaining)
+        outer[index][0] += delta_lon * weight
+        outer[index][1] += delta_lat * weight
+        inner[index][0] += delta_lon * weight
+        inner[index][1] += delta_lat * weight
+        previous_index = index
+
+    _set_lane_polygon_boundaries(feature, outer, inner)
+    return True
+
+
+def _repair_lane_connection_geometry(
+    lane_geojson: dict[str, Any],
+    *,
+    minimum_gap_m: float = 0.25,
+    maximum_gap_m: float = 15.0,
+) -> int:
+    """Smooth junction endpoints onto their linked non-junction lane centers."""
+    features = lane_geojson.get("features") or []
+    features_by_key = {
+        str((feature.get("properties") or {}).get("lane_key") or ""): feature
+        for feature in features
+    }
+    assignments: dict[
+        tuple[str, str],
+        tuple[float, dict[str, Any], list[float]],
+    ] = {}
+
+    for from_feature in features:
+        from_props = from_feature.get("properties") or {}
+        from_key = str(from_props.get("lane_key") or "")
+        from_endpoint = _lane_travel_endpoint(from_feature, "exit")
+        if not from_key or from_endpoint is None:
+            continue
+        for successor_key in from_props.get("successor_keys") or []:
+            to_feature = features_by_key.get(str(successor_key))
+            if to_feature is None or to_feature is from_feature:
+                continue
+            to_endpoint = _lane_travel_endpoint(to_feature, "entry")
+            if to_endpoint is None:
+                continue
+            gap_m = _lon_lat_distance_m(
+                from_endpoint["center"],
+                to_endpoint["center"],
+            )
+            if gap_m <= minimum_gap_m or gap_m > maximum_gap_m:
+                continue
+
+            from_is_junction = _is_junction_lane_feature(from_feature)
+            to_is_junction = _is_junction_lane_feature(to_feature)
+            if from_is_junction and not to_is_junction:
+                moving_key = from_key
+                moving_feature = from_feature
+                moving_endpoint = from_endpoint
+                target_center = to_endpoint["center"]
+            elif to_is_junction:
+                moving_key = str(
+                    (to_feature.get("properties") or {}).get("lane_key") or ""
+                )
+                moving_feature = to_feature
+                moving_endpoint = to_endpoint
+                target_center = from_endpoint["center"]
+            else:
+                continue
+
+            assignment_key = (moving_key, moving_endpoint["name"])
+            existing = assignments.get(assignment_key)
+            if existing is None or gap_m < existing[0]:
+                assignments[assignment_key] = (
+                    gap_m,
+                    moving_feature,
+                    target_center,
+                )
+
+    repaired_count = 0
+    for (_, endpoint_name), (_, feature, target_center) in assignments.items():
+        if _smoothly_shift_lane_endpoint(feature, endpoint_name, target_center):
+            repaired_count += 1
+    return repaired_count
+
+
+def _map_to_lane_geojson(
+    odr_map: Any,
+    *,
+    repair_connections: bool = True,
+) -> dict[str, Any]:
     """Export every non-center lane and its predecessor/successor keys."""
     features: list[dict[str, Any]] = []
+    lane_keys = [
+        lane.key
+        for road in odr_map.getRoads()
+        for section in road.get_lanesections()
+        for lane in section.get_lanes()
+        if lane.id != 0
+    ]
+    lane_key_names = _web_lane_key_names(lane_keys)
     routing_graph = odr_map.getRoutingGraph()
     lane_successors = {
-        lane_key.to_string(): [successor.to_string() for successor, _ in successors]
+        lane_key_names.get(lane_key, lane_key.to_string()): [
+            lane_key_names.get(successor, successor.to_string())
+            for successor, _ in successors
+        ]
         for lane_key, successors in routing_graph.lane_key_to_successors.items()
     }
     lane_predecessors = {
-        lane_key.to_string(): [predecessor.to_string() for predecessor, _ in predecessors]
+        lane_key_names.get(lane_key, lane_key.to_string()): [
+            lane_key_names.get(predecessor, predecessor.to_string())
+            for predecessor, _ in predecessors
+        ]
         for lane_key, predecessors in routing_graph.lane_key_to_predecessors.items()
     }
     for road in odr_map.getRoads():
@@ -264,10 +531,55 @@ def _map_to_lane_geojson(odr_map: Any) -> dict[str, Any]:
                     section_end=section_end,
                     lane_successors=lane_successors,
                     lane_predecessors=lane_predecessors,
+                    lane_key_names=lane_key_names,
                 )
                 if feature is not None:
                     features.append(feature)
-    return _feature_collection(features)
+    lane_geojson = _feature_collection(features)
+    if repair_connections:
+        _repair_lane_connection_geometry(lane_geojson)
+    return lane_geojson
+
+
+def _map_to_lane_geometry_geojson(odr_map: Any) -> dict[str, Any]:
+    """Export exact lane polygons with only preview-required properties."""
+    lanes = [
+        lane
+        for road in odr_map.getRoads()
+        for section in road.get_lanesections()
+        for lane in section.get_lanes()
+        if lane.id != 0
+    ]
+    lane_key_names = _web_lane_key_names([lane.key for lane in lanes])
+    features: list[dict[str, Any]] = []
+    for road in odr_map.getRoads():
+        if not road.ref_line.s0_to_geometry:
+            continue
+        for section in road.get_lanesections():
+            for lane in section.get_lanes():
+                geometry_result = _lane_geometry(odr_map, road, lane)
+                if geometry_result is None:
+                    continue
+                geometry, lane_width = geometry_result
+                if not _geometry_has_finite_coordinates(geometry):
+                    continue
+                lane_key = lane_key_names.get(lane.key, lane.key.to_string())
+                features.append(
+                    {
+                        "type": "Feature",
+                        "id": lane_key,
+                        "properties": {
+                            "feature_type": "lane",
+                            "lane_key": lane_key,
+                            "lane_id": lane.id,
+                            "lane_type": lane.type,
+                            "junction": road.junction,
+                            "width": lane_width,
+                        },
+                        "geometry": geometry,
+                    }
+                )
+    return {"type": "FeatureCollection", "features": features}
 
 
 def _meter_box(lon: float, lat: float, size_m: float) -> list[list[float]]:
@@ -641,7 +953,12 @@ def _lane_polygon_centerline_lon_lat(feature: dict[str, Any]) -> list[tuple[floa
         return []
     rings = geometry.get("coordinates") or []
     ring = rings[0] if rings else []
-    points = ring[:-1] if len(ring) > 1 and ring[0] == ring[-1] else ring
+    has_explicit_closure = (
+        len(ring) > 1
+        and len(ring) % 2 == 1
+        and ring[0] == ring[-1]
+    )
+    points = ring[:-1] if has_explicit_closure else ring
     if len(points) < 4:
         return []
     half = len(points) // 2
@@ -812,6 +1129,166 @@ def _set_lane_width(lane_node: ET.Element, width: Any) -> None:
     )
 
 
+def _scale_lane_width(lane_node: ET.Element, scale: Any) -> bool:
+    """Scale every lane-width polynomial without destroying its profile.
+
+    Applying one constant width to a junction lane removes its taper and can
+    separate it from predecessor/successor lanes. Scaling all polynomial
+    coefficients preserves zero-width ends, transitions, and piecewise width
+    records while changing the typical rendered width.
+    """
+    try:
+        width_scale = float(scale)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(width_scale) or width_scale <= 0.0:
+        return False
+
+    width_nodes = lane_node.findall("width")
+    if not width_nodes:
+        return False
+    for width_node in width_nodes:
+        for coefficient in ("a", "b", "c", "d"):
+            value = _float(width_node, coefficient, 0.0)
+            width_node.set(coefficient, _fmt(value * width_scale))
+    return True
+
+
+def _rebuild_lane_section_borders(road: Any, lane_section: Any) -> None:
+    """Rebuild cumulative lane borders after in-memory width scaling."""
+    if 0 not in lane_section.id_to_lane:
+        raise RuntimeError("lane section does not have lane #0")
+
+    previous_border = None
+    for lane_id in sorted(
+        lane_id for lane_id in lane_section.id_to_lane if lane_id > 0
+    ):
+        lane = lane_section.id_to_lane[lane_id]
+        lane.outer_border = (
+            lane.lane_width
+            if previous_border is None
+            else previous_border.add(lane.lane_width)
+        )
+        previous_border = lane.outer_border
+
+    previous_border = None
+    for lane_id in sorted(
+        (lane_id for lane_id in lane_section.id_to_lane if lane_id < 0),
+        reverse=True,
+    ):
+        lane = lane_section.id_to_lane[lane_id]
+        signed_width = lane.lane_width.negate()
+        lane.outer_border = (
+            signed_width
+            if previous_border is None
+            else previous_border.add(signed_width)
+        )
+        previous_border = lane.outer_border
+
+    lane_section.id_to_lane[0].outer_border = (
+        lane_section.id_to_lane[0].lane_width
+    )
+    for lane in lane_section.id_to_lane.values():
+        lane.outer_border = lane.outer_border.add(road.lane_offset)
+
+
+def _apply_lane_width_scales_in_memory(
+    odr_map: Any,
+    lane_geojson: dict[str, Any],
+    reset_section_keys: set[tuple[str, float]] | None = None,
+) -> int:
+    """Apply browser width scales to a copied parsed map without file I/O."""
+    lanes = [
+        lane
+        for road in odr_map.getRoads()
+        for section in road.get_lanesections()
+        for lane in section.get_lanes()
+        if lane.id != 0
+    ]
+    lane_key_names = _web_lane_key_names([lane.key for lane in lanes])
+    scale_by_key: dict[str, float] = {}
+    for feature in lane_geojson.get("features") or []:
+        lane_key = str((feature.get("properties") or {}).get("lane_key") or "")
+        try:
+            width_scale = float(feature.get("width_scale"))
+        except (TypeError, ValueError):
+            continue
+        if lane_key and math.isfinite(width_scale) and width_scale > 0.0:
+            scale_by_key[lane_key] = width_scale
+
+    scaled_count = 0
+    reset_section_keys = reset_section_keys or set()
+    for road in odr_map.getRoads():
+        for section in road.get_lanesections():
+            section_was_scaled = False
+            for lane in section.get_lanes():
+                lane_key = lane_key_names.get(lane.key, lane.key.to_string())
+                width_scale = scale_by_key.get(lane_key)
+                if width_scale is None:
+                    continue
+                for polynomial in lane.lane_width.s0_to_poly.values():
+                    polynomial.a *= width_scale
+                    polynomial.b *= width_scale
+                    polynomial.c *= width_scale
+                    polynomial.d *= width_scale
+                scaled_count += 1
+                section_was_scaled = True
+            section_key = (str(road.id), float(section.s0))
+            if section_was_scaled or section_key in reset_section_keys:
+                _rebuild_lane_section_borders(road, section)
+    return scaled_count
+
+
+def _reset_preview_lane_widths(
+    source_map: Any,
+    preview_map: Any,
+) -> set[tuple[str, float]]:
+    """Reset a reusable preview map to the loaded map's lane-width state."""
+    source_lanes = {
+        (str(lane.road_id), float(lane.lanesection_s0), int(lane.id)): lane
+        for road in source_map.getRoads()
+        for section in road.get_lanesections()
+        for lane in section.get_lanes()
+    }
+    reset_section_keys: set[tuple[str, float]] = set()
+    for road in preview_map.getRoads():
+        for section in road.get_lanesections():
+            section_was_reset = False
+            for lane in section.get_lanes():
+                lane_key = (
+                    str(lane.road_id),
+                    float(lane.lanesection_s0),
+                    int(lane.id),
+                )
+                source_lane = source_lanes.get(lane_key)
+                if source_lane is None:
+                    raise RuntimeError(
+                        "Lane preview structure no longer matches the loaded map."
+                    )
+                source_polynomials = source_lane.lane_width.s0_to_poly
+                preview_polynomials = lane.lane_width.s0_to_poly
+                if source_polynomials.keys() != preview_polynomials.keys():
+                    lane.lane_width = deepcopy(source_lane.lane_width)
+                    section_was_reset = True
+                    continue
+                for s0, source_polynomial in source_polynomials.items():
+                    preview_polynomial = preview_polynomials[s0]
+                    if (
+                        preview_polynomial.a != source_polynomial.a
+                        or preview_polynomial.b != source_polynomial.b
+                        or preview_polynomial.c != source_polynomial.c
+                        or preview_polynomial.d != source_polynomial.d
+                    ):
+                        section_was_reset = True
+                    preview_polynomial.a = source_polynomial.a
+                    preview_polynomial.b = source_polynomial.b
+                    preview_polynomial.c = source_polynomial.c
+                    preview_polynomial.d = source_polynomial.d
+            if section_was_reset:
+                reset_section_keys.add((str(road.id), float(section.s0)))
+    return reset_section_keys
+
+
 def _apply_lane_geojson_edits(odr_map: Any, lane_geojson: dict[str, Any]) -> None:
     """Apply lane attributes and lane network links from browser GeoJSON.
 
@@ -869,7 +1346,16 @@ def _apply_lane_geojson_edits(odr_map: Any, lane_geojson: dict[str, Any]) -> Non
             _set_lane_link(lane_node, "predecessor", props.get("predecessor"))
         if "successor" in props:
             _set_lane_link(lane_node, "successor", props.get("successor"))
-        if "width" in props:
+        width_scale = feature.get("width_scale")
+        width_was_scaled = width_scale is not None and _scale_lane_width(
+            lane_node,
+            width_scale,
+        )
+        if (
+            not width_was_scaled
+            and feature.get("width_edited")
+            and "width" in props
+        ):
             _set_lane_width(lane_node, props.get("width"))
         lane_delta = _lane_translation_delta_xy(odr_map, feature)
         if lane_delta is not None:
@@ -914,18 +1400,23 @@ def _signals_node(road_node: ET.Element) -> ET.Element:
     return node
 
 
-def _apply_signal_geojson_edits(odr_map: Any, signal_geojson: dict[str, Any]) -> None:
-    """Apply edited signal heads, posts, and mast arms back to XML."""
+def _apply_signal_geojson_edits(
+    odr_map: Any,
+    signal_geojson: dict[str, Any],
+    *,
+    update_objects: bool = True,
+    update_signals: bool = True,
+) -> None:
+    """Apply visible signal/object edits without deleting unparsed metadata."""
     features = signal_geojson.get("features") or []
 
     root = odr_map.root
     seen_objects: set[tuple[str, str]] = set()
     seen_signals: set[tuple[str, str]] = set()
-    # The browser sends the whole visible signal/object collection on save.
-    # Treat it as authoritative so deleting the last signal, support, or
-    # environment object is saved instead of being ignored as an empty update.
-    has_object_features = True
-    has_signal_features = True
+    # Parsed collections are authoritative, including an intentionally empty
+    # collection. Disabled collections remain untouched in the source XML.
+    has_object_features = update_objects
+    has_signal_features = update_signals
 
     for feature in features:
         props = feature.get("properties") or {}
@@ -946,6 +1437,8 @@ def _apply_signal_geojson_edits(odr_map: Any, signal_geojson: dict[str, Any]) ->
                 pass
 
         if props.get("feature_type") in ("signal_object", "environment_object"):
+            if not update_objects:
+                continue
             has_object_features = True
             object_id = str(props.get("object_id") or props.get("object_key") or "")
             if not object_id:
@@ -983,6 +1476,8 @@ def _apply_signal_geojson_edits(odr_map: Any, signal_geojson: dict[str, Any]) ->
                 obj_node.set("objectColor", _fmt(props.get("object_color") or ""))
                 obj_node.set("source", _fmt(props.get("source") or "maplibre-gl-geo-editor"))
         elif props.get("feature_type") == "signal":
+            if not update_signals:
+                continue
             has_signal_features = True
             signal_id = str(props.get("signal_id") or props.get("signal_key") or "")
             if not signal_id:
@@ -1088,6 +1583,7 @@ class _ViewerState:
         self.tmp_dir = tempfile.TemporaryDirectory(prefix="pyxodr3d_web_")
         self.current_file: Path | None = None
         self.current_map: Any | None = None
+        self._lane_preview_map: Any | None = None
         self.browser_sessions: set[str] = set()
         self.shutdown_timer: threading.Timer | None = None
         self.last_load_seconds: float | None = None
@@ -1097,18 +1593,31 @@ class _ViewerState:
     def load_path(self, xodr_path: Path) -> dict[str, Any]:
         """Load an OpenDRIVE file from disk and return browser-ready GeoJSON."""
         start = time.perf_counter()
-        self.current_file = Path(xodr_path)
-        self.current_map = readXodr(self.current_file)
+        source_path = Path(xodr_path)
+        loaded_map = readXodr(source_path)
+        self.current_file = source_path
+        self.current_map = loaded_map
         response = self.as_response()
+        self._lane_preview_map = deepcopy(loaded_map)
         self.last_load_seconds = time.perf_counter() - start
         response["server_load_seconds"] = self.last_load_seconds
         return response
 
-    def load_text(self, file_text: str, filename: str = "network.xodr") -> dict[str, Any]:
+    def load_text(
+        self,
+        file_text: str,
+        filename: str = "network.xodr",
+    ) -> dict[str, Any]:
         """Load an uploaded browser file through a temporary local copy."""
         target = Path(self.tmp_dir.name) / Path(filename).name
         target.write_text(file_text, encoding="utf-8")
         return self.load_path(target)
+
+    def reload_current(self) -> dict[str, Any]:
+        """Reload the current source file with the standard parser behavior."""
+        if self.current_file is None:
+            raise RuntimeError("No OpenDRIVE map is loaded.")
+        return self.load_path(self.current_file)
 
     def as_response(self) -> dict[str, Any]:
         """Return the full payload needed by the MapLibre page."""
@@ -1128,6 +1637,224 @@ class _ViewerState:
             "boundary": self.current_map.getBoundary(),
         }
 
+    def route_between_lanes(
+        self,
+        start_lane_key: str,
+        end_lane_key: str,
+    ) -> dict[str, Any]:
+        """Return the directed shortest path between two lane keys."""
+        if self.current_map is None:
+            raise RuntimeError("No OpenDRIVE map is loaded.")
+
+        lane_keys: list[LaneKey] = []
+        for road in self.current_map.getRoads():
+            for section in road.get_lanesections():
+                for lane in section.get_lanes():
+                    if lane.id != 0:
+                        lane_keys.append(lane.key)
+        lane_key_names = _web_lane_key_names(lane_keys)
+        lane_lookup = {name: lane_key for lane_key, name in lane_key_names.items()}
+
+        start_name = str(start_lane_key or "").strip()
+        end_name = str(end_lane_key or "").strip()
+        if start_name not in lane_lookup:
+            raise ValueError(f"Unknown start lane key: {start_name or '(empty)'}")
+        if end_name not in lane_lookup:
+            raise ValueError(f"Unknown destination lane key: {end_name or '(empty)'}")
+
+        graph = self.current_map.getRoutingGraph()
+        path = graph.shortest_path(lane_lookup[start_name], lane_lookup[end_name])
+        if not path:
+            raise ValueError(
+                f"No directed lane route exists from {start_name} to {end_name}."
+            )
+
+        edge_weights: dict[tuple[LaneKey, LaneKey], float] = {}
+        for edge in graph.edges:
+            edge_key = (edge.from_lane, edge.to_lane)
+            edge_weights[edge_key] = min(
+                edge_weights.get(edge_key, math.inf),
+                float(edge.weight),
+            )
+        route_length_m = sum(
+            edge_weights.get((from_lane, to_lane), 0.0)
+            for from_lane, to_lane in zip(path, path[1:])
+        )
+        lane_features = {
+            str(feature.get("id")): feature
+            for feature in _map_to_lane_geojson(self.current_map)["features"]
+        }
+        route_features: list[dict[str, Any]] = []
+        path_names = [
+            lane_key_names.get(lane_key, lane_key.to_string()) for lane_key in path
+        ]
+        for index, lane_name in enumerate(path_names):
+            feature = lane_features.get(lane_name)
+            if feature is None:
+                continue
+            role = "path"
+            if len(path_names) == 1:
+                role = "start_end"
+            elif index == 0:
+                role = "start"
+            elif index == len(path_names) - 1:
+                role = "end"
+            route_features.append(
+                {
+                    **feature,
+                    "properties": {
+                        **feature["properties"],
+                        "route_order": index,
+                        "route_role": role,
+                    },
+                }
+            )
+
+        return {
+            "start_lane_key": start_name,
+            "end_lane_key": end_name,
+            "lane_keys": path_names,
+            "lane_count": len(path_names),
+            "length_m": route_length_m,
+            "route_geojson": _feature_collection(route_features),
+        }
+
+    def preview_lane_geojson(
+        self,
+        lane_geojson: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Rebuild width-edited lane polygons from a copied parsed map.
+
+        Normal width changes stay entirely in memory. Structural lane changes
+        and dragged geometry use the slower XML round-trip fallback because
+        those edits must rebuild the parsed road graph.
+        """
+        if self.current_map is None:
+            raise RuntimeError("No OpenDRIVE map is loaded.")
+
+        loaded_lanes = [
+            lane
+            for road in self.current_map.getRoads()
+            for section in road.get_lanesections()
+            for lane in section.get_lanes()
+            if lane.id != 0
+        ]
+        loaded_key_names = _web_lane_key_names(
+            [lane.key for lane in loaded_lanes]
+        )
+        loaded_lane_keys = {
+            loaded_key_names.get(lane.key, lane.key.to_string())
+            for lane in loaded_lanes
+        }
+        incoming_features = lane_geojson.get("features") or []
+        incoming_lane_keys = {
+            str((feature.get("properties") or {}).get("lane_key") or "")
+            for feature in incoming_features
+            if (feature.get("properties") or {}).get("feature_type") == "lane"
+        }
+        needs_structural_rebuild = (
+            incoming_lane_keys != loaded_lane_keys
+            or any(
+                feature.get("geometry_edited")
+                or (feature.get("properties") or {}).get("geometry_edited")
+                for feature in incoming_features
+            )
+        )
+        if needs_structural_rebuild:
+            return self._preview_lane_geojson_via_roundtrip(lane_geojson)
+
+        if self._lane_preview_map is None:
+            self._lane_preview_map = deepcopy(self.current_map)
+        preview_map = self._lane_preview_map
+        reset_section_keys = _reset_preview_lane_widths(
+            self.current_map,
+            preview_map,
+        )
+        scaled_lane_count = _apply_lane_width_scales_in_memory(
+            preview_map,
+            lane_geojson,
+            reset_section_keys,
+        )
+        preview_geojson = _map_to_lane_geometry_geojson(preview_map)
+
+        incoming_by_key = {
+            str((feature.get("properties") or {}).get("lane_key") or ""): feature
+            for feature in incoming_features
+        }
+        for preview_feature in preview_geojson.get("features") or []:
+            preview_properties = preview_feature.get("properties") or {}
+            incoming_feature = incoming_by_key.get(
+                str(preview_properties.get("lane_key") or "")
+            )
+            if incoming_feature is None:
+                continue
+            incoming_properties = incoming_feature.get("properties") or {}
+            for property_name in (
+                "predecessor_keys",
+                "successor_keys",
+                "predecessor",
+                "successor",
+                "junction",
+            ):
+                if property_name in incoming_properties:
+                    preview_properties[property_name] = incoming_properties[
+                        property_name
+                    ]
+
+        repaired_connection_count = _repair_lane_connection_geometry(
+            preview_geojson
+        )
+        preview_property_names = {
+            "feature_type",
+            "lane_key",
+            "lane_id",
+            "lane_type",
+            "junction",
+            "width",
+        }
+        for preview_feature in preview_geojson.get("features") or []:
+            preview_properties = preview_feature.get("properties") or {}
+            preview_feature["properties"] = {
+                name: value
+                for name, value in preview_properties.items()
+                if name in preview_property_names
+            }
+        return {
+            "lane_geojson": preview_geojson,
+            "preview_mode": "memory",
+            "scaled_lane_count": scaled_lane_count,
+            "repaired_connection_count": repaired_connection_count,
+        }
+
+    def _preview_lane_geojson_via_roundtrip(
+        self,
+        lane_geojson: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Rebuild structural lane edits through a temporary OpenDRIVE file."""
+        if self.current_map is None:
+            raise RuntimeError("No OpenDRIVE map is loaded.")
+
+        preview_token = f"{threading.get_ident()}_{time.time_ns()}"
+        preview_source = (
+            Path(self.tmp_dir.name) / f"lane_preview_source_{preview_token}.xodr"
+        )
+        preview_edited = (
+            Path(self.tmp_dir.name) / f"lane_preview_edited_{preview_token}.xodr"
+        )
+        try:
+            self.current_map.saveXodr(preview_source)
+            preview_map = readXodr(preview_source)
+            _apply_lane_geojson_edits(preview_map, lane_geojson)
+            preview_map.saveXodr(preview_edited)
+            recalculated_map = readXodr(preview_edited)
+            return {
+                "lane_geojson": _map_to_lane_geojson(recalculated_map),
+                "preview_mode": "roundtrip",
+            }
+        finally:
+            preview_source.unlink(missing_ok=True)
+            preview_edited.unlink(missing_ok=True)
+
     def save_geojson(
         self,
         geojson: dict[str, Any],
@@ -1141,13 +1868,20 @@ class _ViewerState:
         if lane_geojson is not None:
             _apply_lane_geojson_edits(self.current_map, lane_geojson)
         if signal_geojson is not None:
-            _apply_signal_geojson_edits(self.current_map, signal_geojson)
+            _apply_signal_geojson_edits(
+                self.current_map,
+                signal_geojson,
+                update_objects=True,
+                update_signals=True,
+            )
         target = Path(self.tmp_dir.name) / "edited_network.xodr"
         self.current_map.saveXodr(target)
         self.current_map = readXodr(target)
         self.current_file = target
+        response = self.as_response()
+        self._lane_preview_map = deepcopy(self.current_map)
         return {
-            **self.as_response(),
+            **response,
             "xodr": target.read_text(encoding="utf-8"),
             "saved_filename": target.name,
         }
@@ -1239,6 +1973,17 @@ class _OpenDriveViewerHandler(SimpleHTTPRequestHandler):
                     response = self.state.load_text(
                         str(payload.get("xodr") or ""),
                         str(payload.get("filename") or "network.xodr"),
+                    )
+                elif path == "/api/reload-xodr":
+                    response = self.state.reload_current()
+                elif path == "/api/route":
+                    response = self.state.route_between_lanes(
+                        str(payload.get("start_lane_key") or ""),
+                        str(payload.get("end_lane_key") or ""),
+                    )
+                elif path == "/api/preview-lane-geometry":
+                    response = self.state.preview_lane_geojson(
+                        payload.get("lane_geojson") or {},
                     )
                 elif path == "/api/save-xodr":
                     response = self.state.save_geojson(

@@ -148,6 +148,12 @@ public instance.
 - Shows topology-aware lane direction arrows: one representative arrow per
   carriageway section and one straightest connected movement per incoming
   junction approach, using predecessor/successor links before RHT/LHT rules.
+- Rebuilds driving-lane width previews with the Python OpenDRIVE mesh generator.
+  Width changes use a reusable in-memory parsed map and scale the source
+  polynomial records instead of replacing their profiles. Linked junction
+  endpoint gaps are blended over the connector length, retaining tapers and
+  aligned connections without moving the far endpoint or changing shoulder,
+  sidewalk, and parking widths.
 - Supports basemaps including OpenStreetMap, Google road/satellite,
   OpenFreeMap Positron, Esri, OpenTopoMap, and a local `Grid Mesh` basemap
   similar to the original grid-style OpenDRIVE view.
@@ -161,6 +167,17 @@ public instance.
   the rounded map view, provides a dedicated centered splitter with a vertical
   three-dot resize grip and readable control sections, resizes the map to the
   remaining space, and remembers the side.
+- Provides project, GitHub, and issue-tracker links above Editor, Routing,
+  and View tabs; the three section icons remain available when the sidebar is
+  collapsed.
+- Provides lane-level Routing: choose start and destination lanes directly on
+  the map, calculate the directed shortest path with the Python routing graph,
+  and display the resulting lane sequence and distance on the map.
+- Mirrors odrviewer.io's View choices for road objects, road signals, road
+  shoulders, road sidewalks, reference lines, direction arrows, roadmarks, the
+  grid, wireframe rendering, and roads. These controls update the corresponding
+  MapLibre layers without reparsing the file. A control is disabled when the
+  loaded source file contains no corresponding feature data.
 - Selects map objects with a single click.
 - Drags lanes, signal heads, posts, and mast arms directly on the map.
 - Supports `Undo Move` and `Ctrl+Z` / `Cmd+Z` for the last drag movement.
